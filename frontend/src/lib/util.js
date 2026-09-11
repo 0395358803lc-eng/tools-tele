@@ -1,39 +1,3 @@
-import i18n from '../i18n'
-
-export function getLocale() {
-  return i18n.language === 'vi' ? 'vi-VN' : 'en-US'
-}
-
-// Localized bulk status label. Falls back to the raw status when no key exists
-// so streaming rows never break on a novel status value from the backend.
-const STATUS_KEYS = {
-  ok: 'bulk.status.ok',
-  success: 'bulk.status.success',
-  failed: 'bulk.status.failed',
-  skipped: 'bulk.status.skipped',
-  pending: 'bulk.status.pending',
-  running: 'bulk.status.running',
-}
-export function statusText(status) {
-  const key = STATUS_KEYS[status] || 'bulk.status.unknown'
-  return i18n.exists(key) ? i18n.t(key) : status
-}
-
-// Localized entity-kind word (group/supergroup/channel/bot/user/chat).
-const KIND_KEYS = {
-  group: 'chat.group',
-  supergroup: 'chat.supergroup',
-  channel: 'chat.channel',
-  bot: 'chat.bot',
-  user: 'checker.labelUser',
-  chat: 'chat.chat',
-}
-export function kindText(kind) {
-  const key = KIND_KEYS[kind]
-  if (key && i18n.exists(key)) return i18n.t(key)
-  return kind
-}
-
 export function initials(first, last) {
   const a = (first || '').trim()[0] || ''
   const b = (last  || '').trim()[0] || ''
@@ -44,7 +8,7 @@ export function fmtTime(iso) {
   if (!iso) return ''
   try {
     const d = new Date(iso)
-    return d.toLocaleString(getLocale(), { hour: '2-digit', minute: '2-digit', month: 'short', day: '2-digit' })
+    return d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', month: 'short', day: '2-digit' })
   } catch { return '' }
 }
 
@@ -60,10 +24,30 @@ export function ensureNotificationPermission() {
   return Promise.resolve(Notification.permission)
 }
 
-export function desktopNotify(title, body) {
+function playNotificationSound() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext
+    if (!AudioCtx) return
+    const ctx = new AudioCtx()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01)
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18)
+    osc.frequency.setValueAtTime(880, ctx.currentTime)
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.start()
+    osc.stop(ctx.currentTime + 0.2)
+    osc.onended = () => ctx.close().catch(() => {})
+  } catch {}
+}
+
+export function desktopNotify(title, body, sound = true) {
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
       new Notification(title, { body })
     }
+    if (sound) playNotificationSound()
   } catch {}
 }

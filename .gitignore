@@ -18,5 +18,9 @@ backend/static/
 .vite/
 .DS_Store
 *.log
-data/
-release/
+
+backups/
+*.pre-restore-*.bak
+sessions.pre-restore-*/
+
+*.tsbuildinfo

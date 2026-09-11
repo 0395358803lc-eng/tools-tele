@@ -1,26 +1,25 @@
-from contextlib import asynccontextmanager
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 import asyncio
 import logging
 import os
 from pathlib import Path
-from sqlalchemy import func, select
 
 from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .config import migrate_legacy_runtime_data, settings
-from .db import AsyncSessionLocal, check_database_integrity, init_db, run_migrations, shutdown_db
-from .models import Account
-from .errors import resolve_error
-from . import secrets_store
-from .tg_manager import manager
-from .auth import router as auth_router, require_auth
-from .routers import accounts, profile, security, groups, messaging, settings as settings_router, bulk
+from .config import settings
 from .logging_config import configure_logging
+from .db import acquire_instance_lock, init_db, release_instance_lock
+from .system_status import readiness
+from .tg_manager import manager
+from .runtime_settings import load_runtime_settings
+from .job_store import recover_interrupted_jobs
+from . import secrets_store
+from .auth import router as auth_router, require_auth, cleanup_auth_state
+from .security_middleware import BrowserSecurityMiddleware
+from .routers import accounts, profile, security, groups, messaging, settings as settings_router, bulk, jobs, audit, system
 
 configure_logging()
 log = logging.getLogger("main")
@@ -28,208 +27,92 @@ log = logging.getLogger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Uvicorn's dictConfig runs after the module-level configure_logging()
-    # at import time, so its "uvicorn.error" logger (which emits
-    # "Application startup complete" / "Uvicorn running ...") loses our
-    # file handler. Re-bridge here with force=True so both console and
-    # data/logs/app.log receive every startup line.
-    configure_logging(force=True)
-    migrate_legacy_runtime_data()
-    # Never expose a backend whose login endpoint is guaranteed to fail.
-    settings.validate_security_config()
-    try:
-        probe = secrets_store._dpapi_encrypt(b"multi-tg-manager-preflight")
-        secret_ok = secrets_store._dpapi_decrypt(probe) == b"multi-tg-manager-preflight"
-        if secret_ok:
-            secret_ok, secret_detail = secrets_store.validate_existing_store()
-        else:
-            secret_detail = "DPAPI round-trip failed"
-    except Exception as exc:
-        secret_ok = False
-        secret_detail = type(exc).__name__
-        log.critical("Windows DPAPI preflight failed error=%s", type(exc).__name__)
-    app.state.secret_store_status = "ok" if secret_ok else "error"
-    app.state.secret_store_detail = secret_detail
     # validate critical env
     if not settings.APP_PASSWORD:
         log.warning("APP_PASSWORD is empty — set it in backend/.env!")
-    if not settings.SESSION_SECRET or len(settings.SESSION_SECRET) < 48:
-        log.warning("SESSION_SECRET is missing or too short — set it in backend/.env!")
-    if not settings.api_configured:
-        log.warning(
-            "TG_API_ID / TG_API_HASH are missing or invalid — get them from "
-            "https://my.telegram.org and fill backend/.env. Logging in / importing "
-            "sessions will not work until then."
-        )
-    integrity_ok, integrity_detail = await check_database_integrity()
-    app.state.database_status = "ok" if integrity_ok else "error"
-    app.state.database_detail = integrity_detail
-    if not integrity_ok:
-        log.critical("Database integrity problem detected: %s", integrity_detail)
-        try:
-            yield
-        finally:
-            await shutdown_db()
-        return
-
-    if not secret_ok:
-        log.critical("Telegram clients were not started because secure storage is unavailable")
-        try:
-            yield
-        finally:
-            await shutdown_db()
-        return
+    if not settings.SECRETS_ENCRYPTION_KEY:
+        log.warning("SECRETS_ENCRYPTION_KEY is empty — encrypted SQL sessions cannot be persisted")
 
     await init_db()
-    await run_migrations()
-    # alembic/env.py calls logging.config.fileConfig which replaces the root
-    # handlers (even with disable_existing_loggers=False the root's handlers
-    # are set to the [handler_console] from alembic.ini). Re-bridge our
-    # RotatingFileHandler to root + uvicorn loggers so "backend startup
-    # complete" and the later "Application startup complete" / "Uvicorn
-    # running ..." messages both persist to data/logs/app.log.
-    configure_logging(force=True)
-    manager.set_loop(asyncio.get_event_loop())
-    await secrets_store.migrate_legacy()
-    await manager.startup_load_all()
-
-    async def status_loop():
-        poll = max(0.5, float(getattr(settings, "STATUS_POLL_SECS", 5.0)))
-        while True:
-            try:
-                # Light connection-state pass (cheap), every tick.
-                await manager.refresh_status_all()
-                # Expensive auth verification: internally throttled + staggered,
-                # so it stays light even when the account fleet grows.
-                await manager.verify_authorizations_all()
-            except Exception as e:
-                log.warning("status refresh: %s", e)
-            await asyncio.sleep(poll)
-    task = asyncio.create_task(status_loop())
-    log.info("backend startup complete host=127.0.0.1 database=ok")
+    await acquire_instance_lock()
+    task = None
     try:
+        await load_runtime_settings()
+        try:
+            migrated_secrets = await secrets_store.migrate_legacy_to_db()
+            if migrated_secrets:
+                log.info("Migrated %d legacy encrypted secret(s) into SQL", migrated_secrets)
+        except Exception as exc:
+            log.warning("Legacy secret migration skipped: %s", exc)
+        recovered = await recover_interrupted_jobs()
+        if recovered:
+            log.warning("Marked %d unfinished bulk job(s) as interrupted", recovered)
+        manager.set_loop(asyncio.get_event_loop())
+        await manager.startup_load_all()
+
+        async def status_loop():
+            while True:
+                try:
+                    await manager.refresh_status_all()
+                    await manager.cleanup_pending()
+                    await cleanup_auth_state()
+                    await recover_interrupted_jobs()
+                except Exception as e:
+                    log.warning("status refresh: %s", e)
+                await asyncio.sleep(30)
+
+        task = asyncio.create_task(status_loop())
         yield
     finally:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        try:
-            await manager.shutdown()
-        finally:
-            await shutdown_db()
-            log.info("backend graceful shutdown complete")
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await manager.shutdown()
+        await release_instance_lock()
 
 
 app = FastAPI(title="Multi TG Manager", lifespan=lifespan)
 
+app.add_middleware(BrowserSecurityMiddleware)
+
+cors_origins = [o.strip() for o in (settings.ALLOWED_ORIGIN or "").split(",") if o.strip()]
+if os.environ.get("NODE_ENV", "").strip().lower() != "production":
+    cors_origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.ALLOWED_ORIGIN, "http://127.0.0.1:5173"],
+    allow_origins=list(dict.fromkeys(cors_origins)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-@app.post("/api/app/shutdown")
-async def request_shutdown(request: Request):
-    """Trigger a *controlled* shutdown: uvicorn's graceful teardown runs the
-    lifespan finally block (manager.shutdown() + WAL checkpoint) before the
-    process exits. We send a console break event (== SIGBREAK, which uvicorn
-    maps to a graceful stop) on a slight delay so this HTTP response is flushed
-    first. Used by STOP.bat.
-
-    Deliberately NOT cookie-authenticated: STOP.bat runs from a shell that has
-    no browser cookie, and stopping the bound-to-127.0.0.1 server is not a data
-    compromise. We still require the request to come from the same machine
-    (loopback) so nothing remote can kill it.
-    """
-    host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
-        log.warning("shutdown request refused from non-loopback client host=%s", host)
-        return JSONResponse({"detail": "Forbidden"}, status_code=403)
-    task = asyncio.create_task(_trigger_graceful_shutdown())
-    app.state.shutdown_notified = True
-    return {"ok": True, "graceful": True}
-
-
-async def _trigger_graceful_shutdown():
-    """Give the response a moment to flush, then poke uvicorn to stop. On
-    Windows the app runs in its own console so CTRL_BREAK_EVENT is scoped to
-    the server process group and NOT broadcast to the user's other windows."""
-    import signal
-    await asyncio.sleep(0.5)
-    try:
-        if os.name == "nt":
-            # Python's signal.raise_signal(SIGBREAK) is the equivalent of
-            # sending CTRL_BREAK_EVENT to ourselves; uvicorn treats it as a
-            # graceful stop request on Windows.
-            os.kill(os.getpid(), signal.CTRL_BREAK_EVENT)
-        else:
-            os.kill(os.getpid(), signal.SIGTERM)
-    except Exception as exc:  # pragma: no cover - platform edge
-        log.warning("graceful shutdown signal failed: %s", exc)
-
-
-@app.exception_handler(StarletteHTTPException)
-async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """Attach a machine-readable ``error_code`` to API error responses.
-
-    Raisers stay untouched: the detail string is resolved via ``errors.py`` and
-    the resulting code + params ride alongside, so the frontend can show a
-    localized message. Unmapped errors keep the original response shape.
-    """
-    detail = exc.detail
-    if isinstance(detail, str):
-        code, params = resolve_error(detail)
-        if code:
-            payload: dict = {"detail": detail, "error_code": code}
-            if params:
-                payload["error_params"] = params
-            return JSONResponse(payload, status_code=exc.status_code)
-    return JSONResponse({"detail": detail}, status_code=exc.status_code)
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    log.exception(
-        "unhandled backend exception method=%s path=%s error=%s",
-        request.method,
-        request.url.path,
-        type(exc).__name__,
-    )
-    return JSONResponse(
-        {"ok": False, "error": {"code": "INTERNAL_ERROR"}},
-        status_code=500,
-    )
-
 # auth endpoints (public)
 app.include_router(auth_router)
 
 
+@app.get("/api/health/live")
+async def health_live():
+    return {"ok": True}
+
+
+@app.get("/api/health/ready")
+async def health_ready():
+    out = await readiness()
+    return JSONResponse(out, status_code=200 if out.get("ok") else 503)
+
+
 @app.get("/api/health")
 async def health():
-    database = getattr(app.state, "database_status", "starting")
-    secret_store = getattr(app.state, "secret_store_status", "starting")
-    clients = await manager.all_clients()
-    connected = sum(1 for client in clients.values() if client.is_connected())
-    account_total = 0
-    if database == "ok":
-        try:
-            async with AsyncSessionLocal() as db:
-                account_total = await db.scalar(select(func.count(Account.id))) or 0
-        except Exception:
-            database = "error"
-    return {
-        "ok": database == "ok" and secret_store == "ok" and settings.api_configured,
-        "backend": "ok",
-        "database": database,
-        "telegram_api": "configured" if settings.api_configured else "missing",
-        "sessions_dir": "ok" if settings.sessions_path.is_dir() else "error",
-        "secret_store": secret_store,
-        "secret_store_detail": getattr(app.state, "secret_store_detail", "starting"),
-        "clients": {"total": account_total, "connected": connected},
-    }
+    out = await readiness()
+    db_kind = "postgresql" if settings.database_url.startswith("postgresql") else "sqlite"
+    out.update({
+        "database_kind": db_kind,
+        "persistent_database": db_kind == "postgresql",
+        "clients": len(manager._clients),
+    })
+    return out
 
 
 # all data routers require auth
@@ -241,6 +124,9 @@ app.include_router(groups.router,          dependencies=PROTECTED_DEPS)
 app.include_router(messaging.router,       dependencies=PROTECTED_DEPS)
 app.include_router(settings_router.router, dependencies=PROTECTED_DEPS)
 app.include_router(bulk.router,            dependencies=PROTECTED_DEPS)
+app.include_router(jobs.router,            dependencies=PROTECTED_DEPS)
+app.include_router(audit.router,           dependencies=PROTECTED_DEPS)
+app.include_router(system.router,          dependencies=PROTECTED_DEPS)
 
 
 # Any /api/* path that didn't match a real route above returns a clean JSON 404
@@ -270,13 +156,8 @@ if STATIC_DIR.is_dir():
         # never intercept the api
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        # try a real file first (favicon, etc.) — resolve() + containment check
-        # rejects any ../ traversal attempt that escapes the static dir.
-        candidate = (STATIC_DIR / full_path).resolve()
-        try:
-            candidate.relative_to(STATIC_DIR.resolve())
-        except ValueError:
-            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        # try a real file first (favicon, etc.)
+        candidate = STATIC_DIR / full_path
         if candidate.is_file():
             return FileResponse(str(candidate))
         index = STATIC_DIR / "index.html"

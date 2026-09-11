@@ -1,5 +1,4 @@
 import { useEffect, useState, useRef } from 'react'
-import { useTranslation } from 'react-i18next'
 import { Endpoints } from '../lib/api'
 import { useToast } from '../lib/toast.jsx'
 import { CopyButton } from '../lib/CopyButton'
@@ -15,7 +14,6 @@ function Section({ title, children }) {
 }
 
 export default function ProfileTab({ account, onRefresh }) {
-  const { t } = useTranslation()
   const toast = useToast()
   const [fn, setFn] = useState('')
   const [ln, setLn] = useState('')
@@ -35,13 +33,12 @@ export default function ProfileTab({ account, onRefresh }) {
     Endpoints.photoUrl(account.id).then((r) => setPhotoUrl(r?.data_url || null)).catch(() => setPhotoUrl(null))
   }, [account?.id])
 
-  if (!account) return <div className="opacity-60">{t('profile.selectAccount')}</div>
+  if (!account) return <div className="opacity-60">Hãy chọn một tài khoản từ thanh bên.</div>
 
   async function saveProfileField(field, value) {
     try {
       await Endpoints.updateProfile(account.id, { [field]: value })
-      const label = field === 'first_name' ? t('profile.firstName') : field === 'last_name' ? t('profile.lastName') : t('profile.bio')
-      toast.success(label)
+      toast.success('Đã lưu thay đổi')
       onRefresh?.()
     } catch (e) { toast.error(e.message) }
   }
@@ -58,7 +55,7 @@ export default function ProfileTab({ account, onRefresh }) {
   async function saveUsername() {
     try {
       await Endpoints.updateUsername(account.id, un)
-      toast.success(t('profile.usernameSaved'))
+      toast.success('Đã lưu tên người dùng')
       onRefresh?.()
     } catch (e) { toast.error(e.message) }
   }
@@ -68,7 +65,7 @@ export default function ProfileTab({ account, onRefresh }) {
     if (!file) return
     try {
       await Endpoints.uploadPhoto(account.id, file)
-      toast.success(t('profile.photoUpdated'))
+      toast.success('Đã cập nhật ảnh')
       const r = await Endpoints.photoUrl(account.id)
       setPhotoUrl(r?.data_url || null)
     } catch (err) { toast.error(err.message) }
@@ -82,11 +79,11 @@ export default function ProfileTab({ account, onRefresh }) {
           {photoUrl ? (
             <img src={photoUrl} alt="" className="w-20 h-20 border-2 border-black dark:border-white object-cover" />
           ) : (
-            <div className="w-20 h-20 border-2 border-black dark:border-white flex items-center justify-center font-extrabold">{t('profile.nA')}</div>
+            <div className="w-20 h-20 border-2 border-black dark:border-white flex items-center justify-center font-extrabold">Không có</div>
           )}
           <div>
             <input ref={fileRef} type="file" accept="image/*" onChange={uploadPhoto} className="hidden" />
-            <button className="nb-btn" onClick={() => fileRef.current?.click()}>{t('profile.uploadPhoto')}</button>
+            <button className="nb-btn" onClick={() => fileRef.current?.click()}>Tải ảnh lên</button>
           </div>
           <div className="ml-auto text-sm flex items-center gap-2 font-mono">
             {account.phone}<CopyButton value={account.phone} />
@@ -94,35 +91,35 @@ export default function ProfileTab({ account, onRefresh }) {
         </div>
       </Section>
 
-      <Section title={t('profile.name')}>
+      <Section title="Họ tên">
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="text-xs font-bold uppercase">{t('profile.firstName')}</label>
+            <label className="text-xs font-bold uppercase">Tên</label>
             <input className="nb-input" value={fn} onChange={(e) => setFn(e.target.value)} />
-            <button className="nb-btn-pri mt-2" onClick={() => saveProfileField('first_name', fn)}>{t('profile.saveFirstName')}</button>
+            <button className="nb-btn-pri mt-2" onClick={() => saveProfileField('first_name', fn)}>Lưu tên</button>
           </div>
           <div>
-            <label className="text-xs font-bold uppercase">{t('profile.lastName')}</label>
+            <label className="text-xs font-bold uppercase">Họ</label>
             <input className="nb-input" value={ln} onChange={(e) => setLn(e.target.value)} />
-            <button className="nb-btn-pri mt-2" onClick={() => saveProfileField('last_name', ln)}>{t('profile.saveLastName')}</button>
+            <button className="nb-btn-pri mt-2" onClick={() => saveProfileField('last_name', ln)}>Lưu họ</button>
           </div>
         </div>
       </Section>
 
-      <Section title={t('profile.username')}>
+      <Section title="Tên người dùng">
         <div className="flex items-center gap-2">
           <span className="font-mono">@</span>
           <input className="nb-input" value={un} onChange={(e) => { setUn(e.target.value); setUnStatus({ checking: false, ok: null, reason: '' }) }} />
           <button className="nb-btn" onClick={checkUsername} disabled={!un || unStatus.checking}>
-            {unStatus.checking ? t('common.checking') : t('profile.check')}
+            {unStatus.checking ? 'Đang kiểm tra…' : 'Kiểm tra'}
           </button>
-          <button className="nb-btn-pri" onClick={saveUsername} disabled={unStatus.ok === false}>{t('profile.saveUsername')}</button>
+          <button className="nb-btn-pri" onClick={saveUsername} disabled={unStatus.ok === false}>Lưu tên người dùng</button>
         </div>
-        {unStatus.ok === true && <div className="text-sm mt-2 text-green-600 dark:text-green-400 font-bold">{t('profile.available')}</div>}
-        {unStatus.ok === false && <div className="text-sm mt-2 text-red-500 font-bold">{t('profile.unavailable', { reason: unStatus.reason })}</div>}
+        {unStatus.ok === true && <div className="text-sm mt-2 text-green-600 dark:text-green-400 font-bold">Có thể sử dụng</div>}
+        {unStatus.ok === false && <div className="text-sm mt-2 text-red-500 font-bold">Unavailable: {unStatus.reason}</div>}
       </Section>
 
-      <Section title={t('profile.bioMax')}>
+      <Section title="Tiểu sử (tối đa 70 ký tự)">
         <textarea
           className="nb-input min-h-[80px]"
           maxLength={70}
@@ -131,7 +128,7 @@ export default function ProfileTab({ account, onRefresh }) {
         />
         <div className="flex items-center justify-between mt-2">
           <span className="text-xs opacity-60">{bio.length}/70</span>
-          <button className="nb-btn-pri" onClick={() => saveProfileField('bio', bio)}>{t('profile.saveBio')}</button>
+          <button className="nb-btn-pri" onClick={() => saveProfileField('bio', bio)}>Lưu tiểu sử</button>
         </div>
       </Section>
       </div>

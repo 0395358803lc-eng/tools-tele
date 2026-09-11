@@ -1,10 +1,11 @@
 import asyncio
 import re
+import uuid
 from urllib.parse import urlparse, parse_qs
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon.tl.functions.messages import (
     SendReactionRequest, GetMessagesViewsRequest,
@@ -21,16 +22,16 @@ from telethon.tl.types import (
 )
 
 from ..db import get_db
-from ..models import Account
+from ..models import Account, TargetCheck, TargetCheckResult
 from ..schemas import (
     SendMessageIn, BulkMessageIn, ReactIn, ViewPostIn,
     AllowedReactionsIn, AllowedReactionsOut, AllowedCustomReaction,
     OpenChatIn, ChatSendIn, BulkWipeChatIn, TargetUsageCheckIn,
 )
 from ..tg_manager import manager
-from ..errors import error_code_of, error_params_of
-from ..utils import friendly_error, bulk_stream, ok_result, skipped_result
+from ..utils import friendly_error, bulk_stream, BulkPacer
 from ..config import settings
+from ..audit import log_audit
 
 router = APIRouter(prefix="/api/messaging", tags=["messaging"])
 
@@ -42,25 +43,20 @@ def _reaction_obj(emoji: str | None, custom_emoji_id: int | None):
     return ReactionEmoji(emoticon=emoji)
 
 
-def _parse_post_link(link: str) -> tuple[str | int, int]:
+def _parse_post_link(link: str) -> tuple[str, int]:
     # supports t.me/<username>/<id> and https://t.me/c/<channel_id>/<id>
     s = link.strip().replace("https://", "").replace("http://", "")
     if s.startswith("t.me/"):
         parts = s[5:].split("/")
         if len(parts) >= 2 and parts[0] == "c" and len(parts) >= 3:
-            channel_id = re.sub(r"\D.*$", "", parts[1])
-            message_id = re.sub(r"\D.*$", "", parts[2])
-            if not channel_id or not message_id:
-                raise ValueError("Invalid private-channel post link")
-            # Telethon's marked channel IDs use the -100<bare-id> form.
-            return int(f"-100{channel_id}"), int(message_id)
+            return parts[1], int(parts[2])  # numeric channel id
         if len(parts) >= 2:
             return parts[0], int(parts[1])
-    raise ValueError("Invalid post link")
+    raise ValueError("Liên kết bài viết không hợp lệ")
 
 
 async def _accounts_named(db: AsyncSession, ids: list[int]) -> list[tuple[int, str, str]]:
-    res = await db.execute(select(Account).where(Account.id.in_(ids)))
+    res = await db.execute(select(Account).where(Account.id.in_(ids), Account.deleted_at.is_(None)))
     return [
         (a.id, a.phone, (f"{a.first_name or ''} {a.last_name or ''}".strip() or a.phone))
         for a in res.scalars().all()
@@ -68,7 +64,7 @@ async def _accounts_named(db: AsyncSession, ids: list[int]) -> list[tuple[int, s
 
 
 async def _all_accounts_named(db: AsyncSession) -> list[tuple[int, str, str]]:
-    res = await db.execute(select(Account).where(Account.status != "banned").order_by(Account.id))
+    res = await db.execute(select(Account).where(Account.deleted_at.is_(None), Account.status != "banned").order_by(Account.id))
     return [
         (a.id, a.phone, (f"{a.first_name or ''} {a.last_name or ''}".strip() or a.phone))
         for a in res.scalars().all()
@@ -79,13 +75,10 @@ async def _all_accounts_named(db: AsyncSession) -> list[tuple[int, str, str]]:
 async def send_message(account_id: int, body: SendMessageIn):
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
-        await manager.run_account_action(
-            account_id,
-            lambda: cli.send_message(body.target, body.text),
-            operation="send_message",
-        )
+        await cli.send_message(body.target, body.text)
+        await log_audit("message:send", account_id, {"target": body.target})
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
     return {"ok": True}
@@ -98,17 +91,17 @@ async def bulk_send(body: BulkMessageIn, db: AsyncSession = Depends(get_db)):
 
     async def _send(cli, aid):
         await cli.send_message(target, text)
-        return ok_result("messaging.sent")
+        return "ok", ""
 
-    return StreamingResponse(bulk_stream(accounts, _send), media_type="application/x-ndjson")
+    return StreamingResponse(bulk_stream(accounts, _send, job_type="message_send"), media_type="application/x-ndjson")
 
 
 @router.post("/react")
 async def react(body: ReactIn, db: AsyncSession = Depends(get_db)):
     try:
         chan, msg_id = _parse_post_link(body.post_link)
-    except Exception:
-        raise HTTPException(400, "Invalid Telegram target or link")
+    except Exception as e:
+        raise HTTPException(400, friendly_error(e))
 
     # Flatten assignments into a per-account reaction map (later assignment wins
     # on overlap). Value is (display_glyph, custom_emoji_id_or_None).
@@ -117,7 +110,7 @@ async def react(body: ReactIn, db: AsyncSession = Depends(get_db)):
         for aid in a.account_ids:
             react_by_id[aid] = (a.emoji, a.custom_emoji_id)
     if not react_by_id:
-        raise HTTPException(400, "No accounts selected for any reaction")
+        raise HTTPException(400, "Chưa chọn tài khoản cho bất kỳ cảm xúc nào")
 
     accounts = await _accounts_named(db, list(react_by_id.keys()))
 
@@ -128,10 +121,9 @@ async def react(body: ReactIn, db: AsyncSession = Depends(get_db)):
             peer=entity, msg_id=msg_id,
             reaction=[_reaction_obj(emoji, custom_id)],
         ))
-        message = f"{emoji} (custom)" if custom_id else emoji
-        return ok_result("messaging.reacted", {"emoji": message})
+        return "ok", (f"{emoji} (tùy chỉnh)" if custom_id else emoji)
 
-    return StreamingResponse(bulk_stream(accounts, _react), media_type="application/x-ndjson")
+    return StreamingResponse(bulk_stream(accounts, _react, job_type="message_react"), media_type="application/x-ndjson")
 
 
 @router.post("/allowed_reactions", response_model=AllowedReactionsOut)
@@ -141,8 +133,8 @@ async def allowed_reactions(body: AllowedReactionsIn, db: AsyncSession = Depends
     ones simply aren't offered)."""
     try:
         chan, _msg_id = _parse_post_link(body.post_link)
-    except Exception:
-        raise HTTPException(400, "Invalid Telegram target or link")
+    except Exception as e:
+        raise HTTPException(400, friendly_error(e))
 
     # pick a client to query through
     cli = manager.get(body.account_id) if body.account_id else None
@@ -150,7 +142,7 @@ async def allowed_reactions(body: AllowedReactionsIn, db: AsyncSession = Depends
         clients = await manager.all_clients()
         cli = next(iter(clients.values()), None)
     if not cli:
-        raise HTTPException(409, "No connected account to read reactions with")
+        raise HTTPException(409, "Không có tài khoản đang kết nối để đọc danh sách cảm xúc")
 
     try:
         entity = await cli.get_entity(chan)
@@ -223,18 +215,17 @@ async def _resolve_custom(cli, ids: list[int]) -> list[AllowedCustomReaction]:
 async def view(body: ViewPostIn, db: AsyncSession = Depends(get_db)):
     try:
         chan, msg_id = _parse_post_link(body.post_link)
-    except Exception:
-        raise HTTPException(400, "Invalid Telegram target or link")
+    except Exception as e:
+        raise HTTPException(400, friendly_error(e))
     accounts = await _accounts_named(db, body.account_ids)
 
     async def _view(cli, aid):
         entity = await cli.get_entity(chan)
         r = await cli(GetMessagesViewsRequest(peer=entity, id=[msg_id], increment=True))
         n = r.views[0].views if (r and r.views) else None
-        return ok_result("messaging.views", {"n": n or 0},
-                         (f"{n} views" if n is not None else ""))
+        return "ok", (f"{n} lượt xem" if n is not None else "")
 
-    return StreamingResponse(bulk_stream(accounts, _view), media_type="application/x-ndjson")
+    return StreamingResponse(bulk_stream(accounts, _view, job_type="message_view", job_parameters={"post_link": body.post_link}), media_type="application/x-ndjson")
 
 
 # ---------------------------------------------------------------------------
@@ -250,14 +241,14 @@ def _parse_chat_input(raw: str) -> tuple[str, str | None]:
     (t.me/+hash or t.me/joinchat/HASH), which require joining first."""
     s = (raw or "").strip()
     if not s:
-        raise ValueError("Enter a username or link")
+        raise ValueError("Nhập tên người dùng hoặc liên kết")
 
     # tg://resolve?domain=foo&start=bar
     if s.lower().startswith("tg://resolve"):
         q = parse_qs(urlparse(s).query)
         dom = (q.get("domain") or [""])[0]
         if not dom:
-            raise ValueError("Invalid tg:// link")
+            raise ValueError("Liên kết tg:// không hợp lệ")
         return dom, (q.get("start") or [None])[0]
 
     body = s
@@ -271,13 +262,13 @@ def _parse_chat_input(raw: str) -> tuple[str, str | None]:
         rest = body.split("/", 1)[1]
         if rest.startswith("+") or rest.lower().startswith("joinchat/"):
             raise ValueError(
-                "That's an invite link — join it from the Groups tab first, "
-                "then open it here by @username."
+                "Đây là liên kết mời — hãy tham gia từ mục Nhóm/Kênh trước, "
+                "sau đó mở tại đây bằng @username."
             )
         path, _, query = rest.partition("?")
         seg = path.split("/")[0]
         if not seg:
-            raise ValueError("Invalid t.me link")
+            raise ValueError("Liên kết t.me không hợp lệ")
         start_param = (parse_qs(query).get("start") or [None])[0] if query else None
         return seg, start_param
 
@@ -326,26 +317,26 @@ def _media_label(msg) -> str | None:
         return None
     t = type(media).__name__
     if "Photo" in t:
-        return "[photo]"
+        return "[ảnh]"
     if "Document" in t:
         doc = getattr(media, "document", None)
         mime = getattr(doc, "mime_type", "") or ""
         if "image" in mime:
-            return "[sticker/image]"
+            return "[nhãn dán/ảnh]"
         if "video" in mime:
             return "[video]"
         if "audio" in mime:
-            return "[audio]"
-        return "[file]"
+            return "[âm thanh]"
+        return "[tệp]"
     if "WebPage" in t:
         return None  # link preview — the URL is already in the text
     if "Poll" in t:
-        return "[poll]"
+        return "[thăm dò]"
     if "Geo" in t:
-        return "[location]"
+        return "[vị trí]"
     if "Contact" in t:
-        return "[contact]"
-    return "[media]"
+        return "[liên hệ]"
+    return "[nội dung đa phương tiện]"
 
 
 def _msg_to_dict(msg) -> dict:
@@ -395,31 +386,26 @@ async def _target_usage_for_client(cli, target: str) -> dict:
 
     if isinstance(entity, User):
         has_messages = await _has_any_message(cli, entity)
-        label = "bot" if getattr(entity, "bot", False) else "user"
+        label = "bot" if getattr(entity, "bot", False) else "người dùng"
         return {
             "status": "present" if has_messages else "absent",
-            "detail": f"has messages with this {label}" if has_messages else f"no messages with this {label}",
-            "error_code": "checker.hasMessages" if has_messages else "checker.noMessages",
-            "error_params": {"label": label},
+            "detail": f"đã có tin nhắn với {label} này" if has_messages else f"chưa có tin nhắn với {label} này",
             "peer": peer,
         }
 
     if isinstance(entity, (Channel, Chat)):
         joined = await _has_dialog(cli, entity)
-        label = peer.get("kind") or "chat"
+        label = peer.get("kind") or "trò chuyện"
         return {
             "status": "present" if joined else "absent",
-            "detail": f"joined/open in dialogs ({label})" if joined else f"not joined/opened ({label})",
-            "error_code": "checker.joinedOpen" if joined else "checker.notJoinedOpen",
-            "error_params": {"label": label},
+            "detail": f"đã tham gia/đã mở ({label})" if joined else f"chưa tham gia/chưa mở ({label})",
             "peer": peer,
         }
 
     has_messages = await _has_any_message(cli, entity)
     return {
         "status": "present" if has_messages else "absent",
-        "detail": "has messages" if has_messages else "no messages found",
-        "error_code": "checker.hasMessagesPlain" if has_messages else "checker.noMessagesFound",
+        "detail": "đã có tin nhắn" if has_messages else "không tìm thấy tin nhắn",
         "peer": peer,
     }
 
@@ -428,56 +414,54 @@ async def _target_usage_for_client(cli, target: str) -> dict:
 async def target_check(body: TargetUsageCheckIn, db: AsyncSession = Depends(get_db)):
     target = (body.target or "").strip()
     if not target:
-        raise HTTPException(400, "Enter a bot, channel, group, or user username")
+        raise HTTPException(400, "Nhập tên người dùng của bot, kênh, nhóm hoặc người dùng")
     try:
         _parse_chat_input(target)
-    except ValueError:
-        raise HTTPException(400, "Invalid Telegram target or link")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
     accounts = await _all_accounts_named(db)
-    conc = max(1, int(getattr(settings, "CONCURRENCY", 8) or 8))
+    conc = max(1, min(50, int(getattr(settings, "CONCURRENCY", 8) or 8)))
     sem = asyncio.Semaphore(conc)
+    pacer = BulkPacer()
     peer: dict | None = None
 
     async def _one(aid: int, phone: str, name: str):
         nonlocal peer
+        cli = manager.get(aid)
+        if not cli:
+            return {"id": aid, "phone": phone, "name": name, "status": "skipped", "detail": "chưa kết nối"}
+        remaining = await manager.flood_wait_remaining(aid)
+        if remaining > 0:
+            return {"id": aid, "phone": phone, "name": name, "status": "skipped", "detail": f"đang bị giới hạn tốc độ, còn khoảng {remaining} giây"}
+        await pacer.wait_turn()
         async with sem:
-            cli = manager.get(aid)
-            if not cli:
-                return {
-                    "id": aid, "phone": phone, "name": name,
-                    "status": "skipped", "detail": "not connected",
-                    "error_code": "ACCOUNT_NOT_CONNECTED",
-                }
             try:
-                checked = await _target_usage_for_client(cli, target)
+                checked = await asyncio.wait_for(_target_usage_for_client(cli, target), timeout=45)
                 if peer is None:
                     peer = checked.get("peer")
-                row = {
-                    "id": aid, "phone": phone, "name": name,
-                    "status": checked["status"], "detail": checked["detail"],
-                }
-                if checked.get("error_code"):
-                    row["error_code"] = checked["error_code"]
-                    if checked.get("error_params"):
-                        row["error_params"] = checked["error_params"]
-                return row
-            except Exception as e:
-                detail = friendly_error(e)
-                row = {
-                    "id": aid, "phone": phone, "name": name,
-                    "status": "failed", "detail": detail,
-                }
-                code = error_code_of(e)
-                if code:
-                    row["error_code"] = code
-                    params = error_params_of(e)
-                    if params:
-                        row["error_params"] = params
-                return row
+                await manager.mark_operation_success(aid)
+                return {"id": aid, "phone": phone, "name": name, "status": checked["status"], "detail": checked["detail"]}
+            except FloodWaitError as exc:
+                await manager.mark_flood_wait(aid, exc.seconds)
+                return {"id": aid, "phone": phone, "name": name, "status": "skipped", "detail": friendly_error(exc)}
+            except Exception as exc:
+                await manager.mark_operation_error(aid, exc)
+                return {"id": aid, "phone": phone, "name": name, "status": "failed", "detail": friendly_error(exc)}
 
     results = await asyncio.gather(*(_one(aid, phone, name) for aid, phone, name in accounts))
+    check_id = uuid.uuid4().hex
+    db.add(TargetCheck(id=check_id, target=target[:255], peer=peer, total=len(results)))
+    for row in results:
+        db.add(TargetCheckResult(
+            target_check_id=check_id,
+            account_id=row["id"],
+            status=row["status"],
+            detail=(row.get("detail") or "")[:2000],
+        ))
+    await db.commit()
     return {
+        "check_id": check_id,
         "target": target,
         "peer": peer,
         "total": len(results),
@@ -489,38 +473,89 @@ async def target_check(body: TargetUsageCheckIn, db: AsyncSession = Depends(get_
     }
 
 
+@router.get("/target_checks")
+async def target_check_history(limit: int = 50, db: AsyncSession = Depends(get_db)):
+    limit = max(1, min(200, int(limit)))
+    res = await db.execute(select(TargetCheck).order_by(TargetCheck.created_at.desc()).limit(limit))
+    checks = list(res.scalars().all())
+    counts: dict[str, dict[str, int]] = {}
+    if checks:
+        count_res = await db.execute(
+            select(
+                TargetCheckResult.target_check_id,
+                TargetCheckResult.status,
+                func.count(TargetCheckResult.id),
+            )
+            .where(TargetCheckResult.target_check_id.in_([row.id for row in checks]))
+            .group_by(TargetCheckResult.target_check_id, TargetCheckResult.status)
+        )
+        for check_id, status, count in count_res.all():
+            counts.setdefault(check_id, {})[status] = int(count)
+    return [{
+        "id": row.id, "target": row.target, "peer": row.peer,
+        "total": row.total, "created_at": row.created_at,
+        "counts": {
+            "present": counts.get(row.id, {}).get("present", 0),
+            "absent": counts.get(row.id, {}).get("absent", 0),
+            "skipped": counts.get(row.id, {}).get("skipped", 0),
+            "failed": counts.get(row.id, {}).get("failed", 0),
+        },
+    } for row in checks]
+
+
+@router.get("/target_checks/{check_id}")
+async def target_check_detail(check_id: str, db: AsyncSession = Depends(get_db)):
+    check = await db.get(TargetCheck, check_id)
+    if not check:
+        raise HTTPException(404, "Không tìm thấy lượt kiểm tra mục tiêu")
+    res = await db.execute(
+        select(TargetCheckResult, Account)
+        .outerjoin(Account, Account.id == TargetCheckResult.account_id)
+        .where(TargetCheckResult.target_check_id == check_id)
+        .order_by(TargetCheckResult.id)
+    )
+    results = []
+    for row, account in res.all():
+        results.append({
+            "account_id": row.account_id,
+            "status": row.status,
+            "detail": row.detail,
+            "phone": account.phone if account else "",
+            "username": account.username if account else "",
+            "name": (f"{account.first_name or ''} {account.last_name or ''}".strip() if account else "")
+                or (account.phone if account else "Tài khoản đã xóa"),
+        })
+    counts = {status: sum(1 for row in results if row["status"] == status) for status in ("present", "absent", "skipped", "failed")}
+    return {
+        "id": check.id, "target": check.target, "peer": check.peer,
+        "total": check.total, "created_at": check.created_at,
+        "counts": counts, "results": results,
+    }
+
+
 @router.post("/{account_id}/open")
 async def open_chat(account_id: int, body: OpenChatIn):
     """Resolve a chat by @username / t.me link, optionally fire a bot referral
     /start, and return the peer info + recent history."""
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
         peer_ref, start_param = _parse_chat_input(body.input)
-    except ValueError:
-        raise HTTPException(400, "Invalid Telegram target or link")
+    except ValueError as e:
+        raise HTTPException(400, friendly_error(e))
     try:
         entity = await cli.get_entity(_coerce_peer(peer_ref))
         started = False
         if start_param and getattr(entity, "bot", False):
             try:
-                await manager.run_account_action(
-                    account_id,
-                    lambda: cli(StartBotRequest(bot=entity, peer=entity, start_param=start_param)),
-                    operation="start_bot",
-                )
-            except FloodWaitError:
-                raise
+                await cli(StartBotRequest(bot=entity, peer=entity, start_param=start_param))
             except Exception:
                 # Fall back to a plain "/start <payload>" — the same payload still
                 # reaches the bot (e.g. if StartBot is rejected for an already-started bot).
-                await manager.run_account_action(
-                    account_id,
-                    lambda: cli.send_message(entity, f"/start {start_param}"),
-                    operation="start_bot_fallback",
-                )
+                await cli.send_message(entity, f"/start {start_param}")
             started = True
+            await log_audit("bot:start", account_id, {"peer": peer_ref})
             await asyncio.sleep(1.0)  # let the bot reply before we read history
         peer = _peer_info(entity)
         msgs = await _history(cli, entity, body.limit)
@@ -535,7 +570,7 @@ async def open_chat(account_id: int, body: OpenChatIn):
 async def chat_history(account_id: int, peer: str, limit: int = 40):
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
         entity = await cli.get_entity(_coerce_peer(peer))
         return {"messages": await _history(cli, entity, limit)}
@@ -547,17 +582,14 @@ async def chat_history(account_id: int, peer: str, limit: int = 40):
 async def chat_send(account_id: int, body: ChatSendIn):
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     text = (body.text or "").strip()
     if not text:
-        raise HTTPException(400, "Message is empty")
+        raise HTTPException(400, "Tin nhắn đang trống")
     try:
         entity = await cli.get_entity(_coerce_peer(body.peer))
-        sent = await manager.run_account_action(
-            account_id,
-            lambda: cli.send_message(entity, text),
-            operation="send_message",
-        )
+        sent = await cli.send_message(entity, text)
+        await log_audit("message:chat_send", account_id, {"peer": body.peer})
         return {"ok": True, "message": _msg_to_dict(sent)}
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
@@ -589,18 +621,30 @@ async def _wipe_chat_for_client(cli, target: str) -> tuple[str, str]:
     except Exception:
         had = None  # couldn't read — don't claim anything either way
 
-    await cli.delete_dialog(entity, revoke=True)
+    async def _do():
+        await cli.delete_dialog(entity, revoke=True)
+
+    try:
+        await _do()
+    except FloodWaitError as fw:
+        if fw.seconds <= 30:
+            await asyncio.sleep(fw.seconds + 1)
+            await _do()
+        else:
+            raise
 
     if had is False:
-        return skipped_result("messaging.noChatToWipe")
-    return ok_result("messaging.chatWiped")
+        return "skipped", "không có cuộc trò chuyện với người dùng này — không có gì để xóa"
+    return "ok", "đã xóa cuộc trò chuyện (xóa ở cả hai phía)"
 
 
 @router.post("/bulk_wipe_chat")
 async def bulk_wipe_chat(body: BulkWipeChatIn, db: AsyncSession = Depends(get_db)):
+    if not body.confirm:
+        raise HTTPException(400, "Cần xác nhận rõ ràng trước khi xóa cuộc trò chuyện hàng loạt")
     accounts = await _accounts_named(db, body.account_ids)
     target = body.target
     return StreamingResponse(
-        bulk_stream(accounts, lambda cli, aid: _wipe_chat_for_client(cli, target)),
+        bulk_stream(accounts, lambda cli, aid: _wipe_chat_for_client(cli, target), job_type="wipe_chat"),
         media_type="application/x-ndjson",
     )

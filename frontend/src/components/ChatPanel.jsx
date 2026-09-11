@@ -1,26 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
-import { useTranslation } from 'react-i18next'
 import { Endpoints } from '../lib/api'
 import { useToast } from '../lib/toast.jsx'
-import { getLocale } from '../lib/util'
+import { accountStatusVi } from '../lib/vi'
 
 function fmtTime(iso) {
   if (!iso) return ''
   const norm = /[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z'
   const d = new Date(norm)
   if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleTimeString(getLocale(), { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-function kindBadge(kind, isBot, t) {
-  const label = isBot ? t('chat.bot') : kind === 'channel' ? t('chat.channel') : kind === 'group' ? t('chat.group') : t('chat.chat')
+function kindBadge(kind, isBot) {
+  const label = isBot ? 'Bot' : (kind === 'user' ? 'Người dùng' : kind === 'channel' ? 'Kênh' : kind === 'group' ? 'Nhóm' : 'Trò chuyện')
   const color = isBot ? 'bg-brand-violet' : kind === 'channel' ? 'bg-brand-info'
     : kind === 'group' ? 'bg-brand-ok' : 'bg-brand-warn'
   return <span className={'nb-badge text-black ' + color}>{label}</span>
 }
 
 export default function ChatPanel({ account, className = '' }) {
-  const { t } = useTranslation()
   const toast = useToast()
   const [input, setInput] = useState('')
   const [peer, setPeer] = useState(null)
@@ -65,7 +63,7 @@ export default function ChatPanel({ account, className = '' }) {
       const r = await Endpoints.openChat(account.id, val)
       setPeer(r.peer)
       setMessages(r.messages || [])
-      if (r.started) toast.success(t('messaging.referralSent'))
+      if (r.started) toast.success('Đã gửi /start giới thiệu ✔')
     } catch (e) {
       toast.error(e.message)
     } finally {
@@ -100,13 +98,13 @@ export default function ChatPanel({ account, className = '' }) {
     <div className={'nb-card flex flex-col h-[75vh] ' + className}>
       {/* header */}
       <div className="flex items-center gap-2 p-2 border-b-2 border-black dark:border-white">
-        <span className="font-extrabold uppercase tracking-tight text-sm shrink-0">{t('chat.chat')}</span>
+        <span className="font-extrabold uppercase tracking-tight text-sm shrink-0">Trò chuyện</span>
         {peer && (
           <>
             <span className="font-bold truncate">{peer.title}</span>
-            {kindBadge(peer.kind, peer.is_bot, t)}
-            <button className="nb-btn !py-0.5 !px-2 ml-auto shrink-0" onClick={newChat} title={t('chat.openAnother')}>
-              {t('chat.new')}
+            {kindBadge(peer.kind, peer.is_bot)}
+            <button className="nb-btn !py-0.5 !px-2 ml-auto shrink-0" onClick={newChat} title="Mở cuộc trò chuyện khác">
+              + Mới
             </button>
           </>
         )}
@@ -120,20 +118,20 @@ export default function ChatPanel({ account, className = '' }) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); openChat() } }}
-            placeholder={t('chat.openPlaceholder')}
+            placeholder="@username hoặc liên kết t.me…"
           />
           <button className="nb-btn-pri !py-1 !px-3 shrink-0" onClick={openChat} disabled={opening || !input.trim()}>
-            {opening ? '…' : t('chat.open')}
+            {opening ? '…' : 'Mở'}
           </button>
         </div>
         <div className="text-[10px] opacity-50">
-          {t('chat.tip')}
+          Mẹo: dán liên kết giới thiệu như <span className="font-mono">t.me/Bot?start=CODE</span> — nút Mở sẽ gửi /start cho bot để lượt giới thiệu được ghi nhận.
         </div>
       </div>
 
       {notConnected && (
         <div className="px-2 py-1 text-[11px] bg-brand-warn text-black border-b-2 border-black dark:border-white">
-          {t('chat.notConnected', { status: account.status })}
+          Tài khoản này đang ở trạng thái <b>{accountStatusVi(account.status)}</b> — hãy kết nối để trò chuyện.
         </div>
       )}
 
@@ -141,17 +139,17 @@ export default function ChatPanel({ account, className = '' }) {
       <div ref={listRef} className="flex-1 overflow-auto p-2 space-y-1 bg-zinc-50 dark:bg-zinc-950/40">
         {!peer && (
           <div className="h-full flex items-center justify-center text-center text-xs opacity-50 px-4">
-            {t('chat.emptyOpen')}
+            Mở cuộc trò chuyện ở trên bằng cách dán @username hoặc liên kết t.me để bắt đầu nhắn tin như trên Telegram.
           </div>
         )}
         {peer && messages.length === 0 && (
-          <div className="h-full flex items-center justify-center text-xs opacity-50">{t('chat.noMessages')}</div>
+          <div className="h-full flex items-center justify-center text-xs opacity-50">Chưa có tin nhắn.</div>
         )}
         {peer && messages.map((m) => {
           if (m.service) {
             return (
               <div key={m.id} className="text-center text-[10px] opacity-50 my-1">
-                {m.text || t('chat.serviceMessage')}
+                {m.text || 'Tin nhắn dịch vụ'}
               </div>
             )
           }
@@ -163,7 +161,7 @@ export default function ChatPanel({ account, className = '' }) {
               }>
                 {m.text
                   ? <span className="whitespace-pre-wrap">{m.text}</span>
-                  : <span className="italic opacity-70">{m.media || t('chat.emptyMedia')}</span>}
+                  : <span className="italic opacity-70">{m.media || '[trống]'}</span>}
                 <div className={'text-[9px] mt-0.5 text-right ' + (m.out ? 'text-black/50' : 'opacity-50')}>
                   {fmtTime(m.date)}
                 </div>
@@ -181,10 +179,10 @@ export default function ChatPanel({ account, className = '' }) {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-            placeholder={t('chat.typeMsg')}
+            placeholder="Nhập tin nhắn…"
           />
           <button className="nb-btn-pri !py-1 !px-3 shrink-0" onClick={send} disabled={sending || !draft.trim()}>
-            {sending ? '…' : t('chat.send')}
+            {sending ? '…' : 'Gửi'}
           </button>
         </div>
       )}

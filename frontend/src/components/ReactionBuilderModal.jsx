@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { useTranslation } from 'react-i18next'
 import { Endpoints } from '../lib/api'
 
 const PRESET_REACTIONS = ['👍', '❤️', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '🎉', '😱', '😢', '🙏', '💯', '🤩']
@@ -15,7 +14,6 @@ const keyOf = (e) => (e.custom_emoji_id ? `c:${e.custom_emoji_id}` : `s:${e.emoj
 // with it. onConfirm(list) receives [{ emoji, pct, custom_emoji_id? }].
 // Reactions the chat has disabled are simply skipped at send time (no error).
 export default function ReactionBuilderModal({ accountCount = 0, accountId = null, postLink = '', initial = [], onConfirm, onClose }) {
-  const { t } = useTranslation()
   const [emojis, setEmojis] = useState(initial.length ? initial : [{ emoji: '🔥', pct: 100 }])
   const [emojiInput, setEmojiInput] = useState('')
 
@@ -31,7 +29,7 @@ export default function ReactionBuilderModal({ accountCount = 0, accountId = nul
     setLoadingAllowed(true); setAllowedErr('')
     Endpoints.allowedReactions(postLink.trim(), accountId || undefined)
       .then((r) => { if (!cancelled) setAllowed(r) })
-      .catch((e) => { if (!cancelled) { setAllowed(null); setAllowedErr(e.message || t('reaction.readFailed')) } })
+      .catch((e) => { if (!cancelled) { setAllowed(null); setAllowedErr(e.message || 'Không thể đọc cuộc trò chuyện này') } })
       .finally(() => { if (!cancelled) setLoadingAllowed(false) })
     return () => { cancelled = true }
   }, [postLink, accountId])
@@ -80,38 +78,40 @@ export default function ReactionBuilderModal({ accountCount = 0, accountId = nul
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
       <div className="nb-card p-6 w-full max-w-lg max-h-[88vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-extrabold uppercase tracking-tight">{t('reaction.title')}</h2>
+          <h2 className="font-extrabold uppercase tracking-tight">Chọn cảm xúc & tỷ lệ %</h2>
           <button className="nb-btn !py-1 !px-2" onClick={onClose}>✕</button>
         </div>
 
         <p className="text-xs opacity-70 mb-2">
-          {t('reaction.desc', { count: accountCount })}
+          Chọn cảm xúc và kéo từng thanh để đặt tỷ lệ trong <b>{accountCount}</b> tài khoản đã chọn
+          sẽ dùng cảm xúc đó. Cảm xúc nào bị cuộc trò chuyện vô hiệu hóa sẽ
+          được bỏ qua (hiển thị trong kết quả) — không tính là lỗi.
         </p>
 
         {/* what this chat allows */}
-        {loadingAllowed && <div className="text-xs opacity-60 mb-2">{t('reaction.readingAllowed')}</div>}
+        {loadingAllowed && <div className="text-xs opacity-60 mb-2">Đang đọc các cảm xúc được phép trong cuộc trò chuyện…</div>}
         {reactionsOff && (
           <div className="nb-card-sm p-2 mb-2 bg-brand-err text-black text-xs font-bold">
-            {t('reaction.reactionsOff')}
+            Cuộc trò chuyện này đã TẮT cảm xúc — không cảm xúc nào hoạt động tại đây.
           </div>
         )}
         {allowed?.mode === 'some' && !reactionsOff && (
           <div className="nb-card-sm p-2 mb-2 bg-brand-warn text-black text-[11px] font-bold">
-            {t('reaction.someAllowed')}
+            Cuộc trò chuyện này chỉ cho phép các cảm xúc hiển thị bên dưới. Cảm xúc khác sẽ bị bỏ qua.
           </div>
         )}
         {allowed?.mode === 'all' && !allowed?.allow_custom && (
-          <div className="text-[11px] opacity-70 mb-2">{t('reaction.allStdNoCustom')}</div>
+          <div className="text-[11px] opacity-70 mb-2">Cho phép toàn bộ emoji tiêu chuẩn, nhưng không cho phép emoji tùy chỉnh (Premium).</div>
         )}
         {allowedErr && (
-          <div className="text-[11px] opacity-70 mb-2">{t('reaction.couldntRead', { err: allowedErr })}</div>
+          <div className="text-[11px] opacity-70 mb-2">Không thể đọc danh sách cảm xúc được phép của cuộc trò chuyện này ({allowedErr}). Bạn vẫn có thể chọn emoji tiêu chuẩn — emoji bị vô hiệu hóa sẽ được bỏ qua.</div>
         )}
         {!postLink?.trim() && (
-          <div className="text-[11px] opacity-70 mb-2">{t('reaction.tipPasteFirst')}</div>
+          <div className="text-[11px] opacity-70 mb-2">Mẹo: dán liên kết bài viết trước để xem chính xác các cảm xúc được phép.</div>
         )}
 
         {/* standard preset grid — click to add/remove */}
-        <div className="text-[11px] font-bold uppercase opacity-70 mb-1">{t('reaction.standardReactions')}</div>
+        <div className="text-[11px] font-bold uppercase opacity-70 mb-1">Cảm xúc tiêu chuẩn</div>
         <div className="flex gap-1 flex-wrap mb-2">
           {standardPresets.map((r) => {
             const on = hasStd(r)
@@ -127,12 +127,12 @@ export default function ReactionBuilderModal({ accountCount = 0, accountId = nul
         {/* custom (premium) emoji this chat allows */}
         {customAllowed.length > 0 && (
           <>
-            <div className="text-[11px] font-bold uppercase opacity-70 mb-1">{t('reaction.customAllowed')}</div>
+            <div className="text-[11px] font-bold uppercase opacity-70 mb-1">Emoji tùy chỉnh được phép</div>
             <div className="flex gap-1 flex-wrap mb-2">
               {customAllowed.map((c) => {
                 const on = hasCustom(c.id)
                 return (
-                  <button key={c.id} title={t('reaction.customEmojiTitle', { id: c.id })} onClick={() => on ? removeKey(`c:${c.id}`) : addCustom(c)}
+                  <button key={c.id} title={`emoji tùy chỉnh ${c.id}`} onClick={() => on ? removeKey(`c:${c.id}`) : addCustom(c)}
                     className={'h-9 px-2 text-lg border-2 border-black dark:border-white flex items-center gap-1 ' + (on ? 'bg-brand-pri' : 'bg-white dark:bg-zinc-900')}>
                     <span>{c.alt || '⭐'}</span>
                     <span className="text-[9px] font-bold opacity-60">★</span>
@@ -145,23 +145,23 @@ export default function ReactionBuilderModal({ accountCount = 0, accountId = nul
 
         {/* add any (standard/pasted) emoji */}
         <div className="flex gap-2 mb-3">
-          <input className="nb-input !py-1 text-sm" placeholder={t('reaction.pasteAnyEmoji')}
+          <input className="nb-input !py-1 text-sm" placeholder="dán / nhập emoji bất kỳ"
             value={emojiInput} onChange={(e) => setEmojiInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { addStandard(emojiInput); setEmojiInput('') } }} />
-          <button className="nb-btn !px-3" onClick={() => { addStandard(emojiInput); setEmojiInput('') }}>{t('reaction.add')}</button>
+          <button className="nb-btn !px-3" onClick={() => { addStandard(emojiInput); setEmojiInput('') }}>Thêm</button>
         </div>
 
         {/* per-emoji percentage bars */}
         <div className="nb-card-sm p-3 mb-3 space-y-2 overflow-auto flex-1">
           <div className="flex items-center mb-1">
-            <span className="font-bold text-xs uppercase">{t('reaction.pctPerReaction')}</span>
-            <button className="nb-btn !py-0.5 !px-1 text-[10px] ml-2" onClick={evenSplit}>{t('reaction.evenSplit')}</button>
+            <span className="font-bold text-xs uppercase">% tài khoản cho mỗi cảm xúc</span>
+            <button className="nb-btn !py-0.5 !px-1 text-[10px] ml-2" onClick={evenSplit}>Chia đều</button>
             <span className={'text-xs ml-auto font-bold ' + (totalPct > 100 ? 'text-brand-err' : 'opacity-70')}>
-              {t('reaction.total', { count: totalPct })}
+              tổng {totalPct}%
             </span>
           </div>
           {emojis.length === 0 && (
-            <div className="text-xs opacity-60">{t('reaction.addAtLeastOne')}</div>
+            <div className="text-xs opacity-60">Hãy thêm ít nhất một cảm xúc ở trên.</div>
           )}
           {emojis.map((e) => {
             const k = keyOf(e)
@@ -174,21 +174,21 @@ export default function ReactionBuilderModal({ accountCount = 0, accountId = nul
                 <input type="range" min="0" max="100" value={e.pct} className="flex-1"
                   onChange={(ev) => setPct(k, Number(ev.target.value))} />
                 <span className="font-mono text-xs w-10 text-right">{e.pct}%</span>
-                <span className={'font-mono text-[11px] w-16 text-right ' + (countFor(e.pct) === 0 ? 'text-brand-warn font-bold' : 'opacity-70')}>→ {t('reaction.acc', { count: countFor(e.pct) })}</span>
+                <span className={'font-mono text-[11px] w-16 text-right ' + (countFor(e.pct) === 0 ? 'text-brand-warn font-bold' : 'opacity-70')}>→ {countFor(e.pct)} tài khoản</span>
                 <button className="text-xs opacity-60 hover:opacity-100" onClick={() => removeKey(k)}>✕</button>
               </div>
             )
           })}
-          {totalPct > 100 && <div className="text-[11px] text-brand-err">{t('reaction.totalOver100')}</div>}
+          {totalPct > 100 && <div className="text-[11px] text-brand-err">Tổng vượt quá 100% — hãy giảm một số tỷ lệ.</div>}
           {totalPct < 100 && emojis.length > 0 && (
-            <div className="text-[11px] opacity-60">{t('reaction.wontReact', { count: 100 - totalPct, n: countFor(100 - totalPct) })}</div>
+            <div className="text-[11px] opacity-60">{100 - totalPct}% tài khoản ({countFor(100 - totalPct)}) sẽ không thả cảm xúc.</div>
           )}
         </div>
 
         <div className="flex gap-2 justify-end">
-          <button className="nb-btn" onClick={onClose}>{t('reaction.cancel')}</button>
+          <button className="nb-btn" onClick={onClose}>Hủy</button>
           <button className="nb-btn-pri" disabled={emojis.length === 0 || totalPct === 0 || totalPct > 100 || reactionsOff} onClick={done}>
-            {t('reaction.done')}
+            Xong
           </button>
         </div>
       </div>

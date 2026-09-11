@@ -1,8 +1,6 @@
 import { useState } from 'react'
-import { useTranslation } from 'react-i18next'
 
 export function CopyButton({ value, label = '' }) {
-  const { t } = useTranslation()
   const [done, setDone] = useState(false)
   if (!value) return null
   const copy = async (e) => {
@@ -16,7 +14,7 @@ export function CopyButton({ value, label = '' }) {
   return (
     <button
       onClick={copy}
-      title={`${t('common.copy')} ${label || value}`}
+      title={`Sao chép ${label || value}`}
       className={
         'inline-flex items-center justify-center w-6 h-6 border-2 border-black dark:border-white text-[10px] font-bold uppercase ' +
         (done ? 'bg-brand-ok text-black' : 'bg-white dark:bg-zinc-900 hover:bg-brand-pri hover:text-black')

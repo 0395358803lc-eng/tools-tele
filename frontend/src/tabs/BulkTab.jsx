@@ -1,33 +1,70 @@
-import { useEffect, useState, useRef, useMemo } from 'react'
-import { useTranslation } from 'react-i18next'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { Endpoints } from '../lib/api'
 import { useToast } from '../lib/toast.jsx'
 import ProgressModal from '../components/ProgressModal.jsx'
-import ConfirmModal from '../components/ConfirmModal.jsx'
 import { useBulkProgress } from '../lib/useBulkProgress'
 
-// Parse CSV/TXT: each line = "firstname,lastname,username,bio".
-// username is col 3 (no separators inside it); bio is col 4+ (commas inside bio
-// allowed by taking the rest). Any field may be blank to skip it.
-function parseCsv(text) {
-  const rows = []
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim()
-    if (!line) continue
-    // allow tab or comma separator
-    const sep = line.includes('\t') ? '\t' : ','
-    const parts = line.split(sep)
-    const first = (parts[0] ?? '').trim()
-    const last = (parts[1] ?? '').trim()
-    const username = (parts[2] ?? '').trim().replace(/^@/, '')
-    const bio = parts.slice(3).join(sep).trim()
-    rows.push({ first_name: first, last_name: last, username, bio })
+// RFC-4180-style CSV/TXT parser with support for quoted commas/tabs,
+// escaped quotes (""), CRLF, and embedded newlines inside quoted fields.
+function detectDelimiter(text) {
+  let quoted = false
+  let commas = 0
+  let tabs = 0
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '"') {
+      if (quoted && text[i + 1] === '"') { i += 1; continue }
+      quoted = !quoted
+      continue
+    }
+    if (!quoted && (ch === '\n' || ch === '\r')) break
+    if (!quoted && ch === ',') commas += 1
+    if (!quoted && ch === '\t') tabs += 1
   }
+  return tabs > commas ? '\t' : ','
+}
+
+function parseDelimited(text, sep) {
+  const rows = []
+  let row = []
+  let field = ''
+  let quoted = false
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '"') {
+      if (quoted && text[i + 1] === '"') { field += '"'; i += 1; continue }
+      quoted = !quoted
+      continue
+    }
+    if (!quoted && ch === sep) {
+      row.push(field); field = ''; continue
+    }
+    if (!quoted && (ch === '\n' || ch === '\r')) {
+      if (ch === '\r' && text[i + 1] === '\n') i += 1
+      row.push(field); field = ''
+      if (row.some((v) => v.trim() !== '')) rows.push(row)
+      row = []
+      continue
+    }
+    field += ch
+  }
+  row.push(field)
+  if (row.some((v) => v.trim() !== '')) rows.push(row)
   return rows
 }
 
+export function parseCsv(text) {
+  const sep = detectDelimiter(text)
+  return parseDelimited(text, sep).map((parts) => ({
+    first_name: (parts[0] ?? '').trim(),
+    last_name: (parts[1] ?? '').trim(),
+    username: (parts[2] ?? '').trim().replace(/^@/, ''),
+    bio: parts.slice(3).join(sep).trim(),
+  }))
+}
+
+
 export default function BulkTab({ accounts, onDone }) {
-  const { t } = useTranslation()
   const toast = useToast()
   const { progress, run, close } = useBulkProgress()
   const [ids, setIds] = useState([])
@@ -45,7 +82,6 @@ export default function BulkTab({ accounts, onDone }) {
   const [photos, setPhotos] = useState([])    // File[]
   const photoRef = useRef(null)
   const [busy, setBusy] = useState(false)
-  const [pending, setPending] = useState(null)
 
   const allChecked = ids.length === accounts.length && accounts.length > 0
   const toggleAll = () => setIds(allChecked ? [] : accounts.map((a) => a.id))
@@ -58,36 +94,26 @@ export default function BulkTab({ accounts, onDone }) {
     reader.onload = () => {
       const rows = parseCsv(String(reader.result || ''))
       setCsvRows(rows)
-      toast.info(t('bulk.loadedCsvRows', { count: rows.length }))
+      toast.info(`Đã tải ${rows.length} dòng CSV`)
     }
-    reader.onerror = () => toast.error(t('bulk.csvReadFail'))
+    reader.onerror = () => toast.error('Không thể đọc tệp CSV')
     reader.readAsText(file)
     if (csvRef.current) csvRef.current.value = ''
   }
   function clearCsv() { setCsvRows([]) }
 
   async function applyProfile() {
-    if (ids.length === 0) { toast.error(t('bulk.pickAccounts1')); return }
+    if (ids.length === 0) { toast.error('Hãy chọn tài khoản'); return }
     const usingCsv = csvRows.length > 0
     if (!usingCsv && !firstName && !lastName && !username && bio === '') {
-      toast.error(t('bulk.setFieldOrCsv'))
+      toast.error('Hãy đặt ít nhất một trường hoặc tải tệp CSV')
       return
     }
     if (!usingCsv && username && !appendNumber && ids.length > 1) {
-      toast.error(t('bulk.usernameUnique'))
+      toast.error('Tên người dùng phải là duy nhất. Hãy bật "Thêm số thứ tự" hoặc dùng CSV cho nhiều tài khoản.')
       return
     }
-    setPending({
-      title: t('bulk.bulkProfileTitle', { count: ids.length }),
-      message: t('bulk.applyProfileConfirm', {
-        count: ids.length,
-        csv: usingCsv ? t('bulk.csvMapsRows', { count: Math.min(ids.length, csvRows.length) }) : '',
-      }),
-      onYes: () => doApplyProfile(usingCsv),
-    })
-  }
-
-  async function doApplyProfile(usingCsv) {
+    if (!confirm(`Áp dụng thay đổi hồ sơ cho ${ids.length} tài khoản?` + (usingCsv ? ` (CSV sẽ ánh xạ ${Math.min(ids.length, csvRows.length)} dòng đầu tiên)` : ''))) return
     let per_account = null
     if (usingCsv) {
       per_account = {}
@@ -113,7 +139,7 @@ export default function BulkTab({ accounts, onDone }) {
       per_account,
     }
     setBusy(true)
-    await run(t('bulk.bulkProfileTitle', { count: ids.length }), (onEvent) => Endpoints.bulkProfile(payload, onEvent))
+    await run(`Sửa hồ sơ hàng loạt (${ids.length} tài khoản)`, (onEvent) => Endpoints.bulkProfile(payload, onEvent))
     setBusy(false)
     onDone?.()
   }
@@ -124,7 +150,7 @@ export default function BulkTab({ accounts, onDone }) {
     if (!list.length) return
     setPhotos((cur) => [...cur, ...list])
     if (photoRef.current) photoRef.current.value = ''  // allow re-picking same files
-    toast.info(t('bulk.addedPhotos', { count: list.length, total: photos.length + list.length }))
+    toast.info(`Đã thêm ${list.length} ảnh (tổng ${photos.length + list.length})`)
   }
   function removePhoto(i) { setPhotos((cur) => cur.filter((_, j) => j !== i)) }
   function clearPhotos() { setPhotos([]) }
@@ -133,26 +159,22 @@ export default function BulkTab({ accounts, onDone }) {
     () => photos.map((f) => ({ name: f.name, size: f.size, url: URL.createObjectURL(f) })),
     [photos]
   )
-  useEffect(() => () => {
-    photoThumbs.forEach((photo) => URL.revokeObjectURL(photo.url))
+
+  useEffect(() => {
+    return () => {
+      for (const thumb of photoThumbs) URL.revokeObjectURL(thumb.url)
+    }
   }, [photoThumbs])
 
   async function applyPhoto() {
-    if (photos.length === 0) { toast.error(t('bulk.pickPhoto')); return }
-    if (ids.length === 0) { toast.error(t('bulk.pickAccounts1')); return }
+    if (photos.length === 0) { toast.error('Hãy chọn ít nhất một ảnh'); return }
+    if (ids.length === 0) { toast.error('Hãy chọn tài khoản'); return }
     const usable = Math.min(photos.length, ids.length)
-    const extra = photos.length > ids.length ? t('bulk.extraPhotos', { count: photos.length - ids.length }) : ''
-    const missing = ids.length > photos.length ? t('bulk.missingPhotos', { count: ids.length - photos.length }) : ''
-    setPending({
-      title: t('bulk.bulkPhotoTitle', { usable, count: ids.length }),
-      message: t('bulk.applyPhotosConfirm', { usable, count: ids.length, extra, missing }),
-      onYes: () => doApplyPhoto(usable),
-    })
-  }
-
-  async function doApplyPhoto(usable) {
+    const extra = photos.length > ids.length ? ` (${photos.length - ids.length} ảnh thừa sẽ bị bỏ qua)` : ''
+    const missing = ids.length > photos.length ? ` (${ids.length - photos.length} tài khoản bị bỏ qua vì thiếu ảnh)` : ''
+    if (!confirm(`Áp dụng ${usable} ảnh cho ${ids.length} tài khoản theo thứ tự?${extra}${missing}`)) return
     setBusy(true)
-    await run(t('bulk.bulkPhotoTitle', { usable, count: ids.length }), (onEvent) => Endpoints.bulkPhoto(ids, photos, onEvent))
+    await run(`Ảnh hồ sơ hàng loạt (${usable}/${ids.length})`, (onEvent) => Endpoints.bulkPhoto(ids, photos, onEvent))
     setBusy(false)
     onDone?.()
   }
@@ -161,58 +183,59 @@ export default function BulkTab({ accounts, onDone }) {
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div className="lg:col-span-2 space-y-4">
         <div className="nb-card p-4">
-          <h3 className="font-extrabold uppercase mb-3">{t('bulk.bulkProfileEdit')}</h3>
+          <h3 className="font-extrabold uppercase mb-3">Sửa hồ sơ hàng loạt</h3>
 
           <div className="nb-card-sm p-3 mb-3 bg-zinc-50 dark:bg-zinc-800">
-            <div className="text-xs font-bold uppercase mb-2">{t('bulk.csvImport')}</div>
+            <div className="text-xs font-bold uppercase mb-2">Nhập CSV / TXT (tùy chọn)</div>
             <div className="flex items-center gap-2 flex-wrap">
               <input ref={csvRef} type="file" accept=".csv,.txt" onChange={loadCsv}
-                className="text-xs file:mr-2 file:cursor-pointer file:border-2 file:border-black file:bg-white file:px-2 file:py-1 file:font-bold file:uppercase" />
+                className="text-xs file:nb-btn file:!py-1 file:!px-2" />
               {csvRows.length > 0 && (
                 <>
-                  <span className="text-xs font-bold">{t('bulk.rowsLoaded', { count: csvRows.length })}</span>
-                  <button className="nb-btn !py-0.5 !px-2 text-xs" onClick={clearCsv}>{t('common.clear')}</button>
+                  <span className="text-xs font-bold">{csvRows.length} dòng đã tải</span>
+                  <button className="nb-btn !py-0.5 !px-2 text-xs" onClick={clearCsv}>Xóa chọn</button>
                 </>
               )}
             </div>
             <div className="text-[10px] opacity-60 mt-1">
-              {t('bulk.csvFormat')}
-              {csvRows.length > 0 && firstName === '' && lastName === '' && bio === '' ? '' : t('bulk.csvIgnoresFields')}
+              Định dạng: mỗi dòng = <code>firstname,lastname,username,bio</code> (tab hoặc dấu phẩy). Hỗ trợ trường có dấu ngoặc kép và dấu phẩy bên trong. Dòng N áp dụng cho tài khoản được chọn thứ N.
+              Có thể để trống bất kỳ trường nào để bỏ qua. <b>Tên người dùng phải là duy nhất</b> cho từng tài khoản (quy định Telegram) — tên đã được dùng sẽ được báo riêng theo tài khoản.
+              {csvRows.length > 0 && firstName === '' && lastName === '' && bio === '' ? '' : ' Khi đã tải CSV, các trường bên dưới sẽ được bỏ qua.'}
             </div>
             {csvRows.length > 0 && (
               <div className="mt-2 max-h-32 overflow-auto text-xs font-mono opacity-80">
                 {csvRows.slice(0, 5).map((r, i) => (
                   <div key={i}>{i + 1}. {r.first_name} | {r.last_name} | {r.username ? '@' + r.username : '—'} | {r.bio.slice(0, 40)}</div>
                 ))}
-                {csvRows.length > 5 && <div>{t('common.more', { count: csvRows.length - 5 })}</div>}
+                {csvRows.length > 5 && <div>... +{csvRows.length - 5} dòng nữa</div>}
               </div>
             )}
           </div>
 
           <div className={'grid grid-cols-2 gap-3 ' + (csvRows.length > 0 ? 'opacity-50 pointer-events-none' : '')}>
             <label>
-              <div className="text-xs font-bold uppercase mb-1">{t('bulk.firstNameAll')}</div>
-              <input className="nb-input" value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder={t('bulk.leaveBlank')} />
+              <div className="text-xs font-bold uppercase mb-1">Tên (giống nhau cho tất cả)</div>
+              <input className="nb-input" value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="để trống để bỏ qua" />
             </label>
             <label>
-              <div className="text-xs font-bold uppercase mb-1">{t('bulk.lastNameAll')}</div>
-              <input className="nb-input" value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder={t('bulk.leaveBlank')} />
+              <div className="text-xs font-bold uppercase mb-1">Họ (giống nhau cho tất cả)</div>
+              <input className="nb-input" value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="để trống để bỏ qua" />
             </label>
             <label className="col-span-2">
-              <div className="text-xs font-bold uppercase mb-1">{t('bulk.usernameNoAt')}</div>
-              <input className="nb-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder={t('bulk.leaveBlank')} />
+              <div className="text-xs font-bold uppercase mb-1">Tên người dùng (không có @)</div>
+              <input className="nb-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="để trống để bỏ qua" />
               <div className="text-[10px] opacity-60 mt-1">
-                {t('bulk.usernameUniqueHint')}
+                Phải là duy nhất cho mỗi tài khoản. Dùng "Thêm số thứ tự" bên dưới để tự tạo (ví dụ myuser1, myuser2), hoặc dùng CSV để đặt tên riêng.
               </div>
             </label>
             <label className="col-span-2">
-              <div className="text-xs font-bold uppercase mb-1">{t('bulk.bioMax')}</div>
-              <textarea maxLength={70} className="nb-input" value={bio} onChange={(e) => setBio(e.target.value)} placeholder={t('bulk.leaveBlank')} />
+              <div className="text-xs font-bold uppercase mb-1">Tiểu sử (tối đa 70 ký tự)</div>
+              <textarea maxLength={70} className="nb-input" value={bio} onChange={(e) => setBio(e.target.value)} placeholder="để trống để bỏ qua" />
             </label>
           </div>
           <label className={'flex items-center gap-2 mt-3 ' + (csvRows.length > 0 ? 'opacity-50 pointer-events-none' : '')}>
             <input type="checkbox" checked={appendNumber} onChange={(e) => setAppendNumber(e.target.checked)} />
-            <span className="text-sm">{t('bulk.appendNumber', { un: username ? ' + ' + t('profile.username') : '', u: username ? ` / "${username}1", "${username}2"` : '' })}</span>
+            <span className="text-sm">Thêm số thứ tự vào tên/họ{username ? ' và tên người dùng' : ''} (ví dụ "Family 1", "Family 2"{username ? `, "${username}1", "${username}2"` : ''})</span>
             {appendNumber && (
               <input type="number" min={1} className="nb-input !w-20 !py-1" value={startNumber}
                 onChange={(e) => setStartNumber(Number(e.target.value) || 1)} />
@@ -220,33 +243,33 @@ export default function BulkTab({ accounts, onDone }) {
           </label>
 
           <button className="nb-btn-pri mt-3" disabled={busy} onClick={applyProfile}>
-            {t('bulk.applyProfileBtn', { count: ids.length })}
+            Áp dụng hồ sơ cho {ids.length} tài khoản
             {csvRows.length > 0 && ids.length > 0 && (
-              <span className="ml-1 opacity-70">{t('bulk.usingCsv', { count: Math.min(ids.length, csvRows.length) })}</span>
+              <span className="ml-1 opacity-70">(dùng CSV — đã ánh xạ {Math.min(ids.length, csvRows.length)})</span>
             )}
           </button>
         </div>
 
         <div className="nb-card p-4">
-          <h3 className="font-extrabold uppercase mb-3">{t('bulk.bulkProfilePhoto')}</h3>
+          <h3 className="font-extrabold uppercase mb-3">Ảnh hồ sơ hàng loạt</h3>
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <input ref={photoRef} type="file" accept="image/*" multiple onChange={addPhotos}
-              className="text-xs file:mr-2 file:cursor-pointer file:border-2 file:border-black file:bg-white file:px-2 file:py-1 file:font-bold file:uppercase" />
+              className="text-xs file:nb-btn file:!py-1 file:!px-2" />
             <button className="nb-btn !py-1 !px-2 text-xs" disabled={photos.length === 0} onClick={clearPhotos}>
-              {t('bulk.clearAll')}
+              Xóa tất cả
             </button>
             <div className="text-xs ml-auto">
-              <span className="font-bold">{t('bulk.photos', { count: photos.length })}</span> •{' '}
-              <span className="font-bold">{ids.length}</span> {t('bulk.accounts')}
+              <span className="font-bold">{photos.length}</span> ảnh •{' '}
+              <span className="font-bold">{ids.length}</span> tài khoản
               {photos.length > 0 && ids.length > 0 && (
                 <span className={'ml-2 nb-badge text-black ' + (photos.length >= ids.length ? 'bg-brand-ok' : 'bg-brand-warn')}>
-                  {photos.length >= ids.length ? t('bulk.enough') : t('bulk.needMore', { count: ids.length - photos.length })}
+                  {photos.length >= ids.length ? 'đủ ảnh' : `cần thêm ${ids.length - photos.length} ảnh`}
                 </span>
               )}
             </div>
           </div>
           <div className="text-[11px] opacity-70 mb-2">
-            {t('bulk.photoHint')}
+            Chọn ảnh theo nhiều đợt (có thể bấm "Chọn tệp" nhiều lần để cộng dồn). Ảnh #1 → tài khoản #1, ảnh #2 → tài khoản #2... Ảnh thừa sẽ bị bỏ qua; nếu ảnh ít hơn số tài khoản, các tài khoản còn lại sẽ được bỏ qua.
           </div>
           {photos.length > 0 && (
             <div className="grid grid-cols-6 sm:grid-cols-8 gap-2 mb-3 max-h-72 overflow-auto p-2 bg-zinc-50 dark:bg-zinc-800 border-2 border-black dark:border-white">
@@ -263,19 +286,19 @@ export default function BulkTab({ accounts, onDone }) {
             </div>
           )}
           <button className="nb-btn-pri" disabled={busy || photos.length === 0 || ids.length === 0} onClick={applyPhoto}>
-            {t('bulk.applyPhotosBtn', { a: Math.min(photos.length, ids.length), b: ids.length })}
+            Áp dụng ảnh cho {Math.min(photos.length, ids.length)}/{ids.length} tài khoản
           </button>
         </div>
       </div>
 
       <div className="nb-card p-4 h-fit">
-        <h3 className="font-extrabold uppercase mb-3">{t('bulk.pickAccounts')}</h3>
+        <h3 className="font-extrabold uppercase mb-3">Chọn tài khoản</h3>
         <label className="flex items-center gap-2 mb-2">
           <input type="checkbox" checked={allChecked} onChange={toggleAll} />
-          <span className="font-bold text-sm">{t('common.selectAll')} ({accounts.length})</span>
+          <span className="font-bold text-sm">Chọn tất cả ({accounts.length})</span>
         </label>
         <div className="text-[10px] opacity-60 mb-2">
-          {t('bulk.orderMatters')}
+          Thứ tự rất quan trọng: dòng N của CSV / ảnh #N → tài khoản #N (từ trên xuống dưới danh sách).
         </div>
         <div className="space-y-1 max-h-[60vh] overflow-auto">
           {accounts.map((a, i) => (
@@ -290,18 +313,6 @@ export default function BulkTab({ accounts, onDone }) {
       </div>
 
       <ProgressModal progress={progress} onClose={close} />
-
-      {pending && (
-        <ConfirmModal
-          title={pending.title}
-          message={pending.message}
-          confirmLabel={t('common.yes')}
-          cancelLabel={t('common.no')}
-          danger
-          onConfirm={() => { const f = pending.onYes; setPending(null); f && f() }}
-          onCancel={() => setPending(null)}
-        />
-      )}
     </div>
   )
 }

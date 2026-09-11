@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { useTranslation } from 'react-i18next'
 import QRCode from 'qrcode'
 import { Endpoints } from '../lib/api'
-import { rowText } from '../lib/err'
 import { useToast } from '../lib/toast.jsx'
+import { jobStatusVi } from '../lib/vi'
 
 export default function AddAccountModal({ onClose, onAdded, onImported }) {
-  const { t } = useTranslation()
   const toast = useToast()
   const [method, setMethod] = useState('phone') // 'phone' | 'qr' | 'session'
 
@@ -42,13 +40,13 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
   // ---------- Phone flow ----------
   async function sendCode() {
     if (!phone.startsWith('+')) {
-      toast.error(t('addAccount.phoneFormatError'))
+      toast.error('Nhập số điện thoại kèm mã quốc gia, ví dụ +8801712345678')
       return
     }
-    setBusy(true); setHint(t('addAccount.sendingCode'))
+    setBusy(true); setHint('Đang gửi mã qua Telegram... có thể mất tới 30 giây')
     try {
       await Endpoints.sendCode(phone)
-      toast.info(t('addAccount.codeSent'))
+      toast.info('Đã gửi mã. Hãy kiểm tra Telegram.')
       setHint('')
       setStep(2)
     } catch (e) { toast.error(e.message); setHint('') } finally { setBusy(false) }
@@ -56,15 +54,15 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
 
   async function submitCode() {
     if (!code) return
-    setBusy(true); setHint(t('addAccount.verifyingCode'))
+    setBusy(true); setHint('Đang xác minh mã...')
     try {
       const r = await Endpoints.signIn(phone, code)
       if (r?.needs_2fa) {
-        toast.info(t('addAccount.twoFaRequired'))
+        toast.info('Cần mật khẩu xác thực 2 bước (2FA)')
         setHint('')
         setStep(3)
       } else {
-        toast.success(t('addAccount.accountAdded'))
+        toast.success('Đã thêm tài khoản!')
         onAdded?.()
       }
     } catch (e) {
@@ -77,10 +75,10 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
 
   async function submit2fa() {
     if (!pwd) return
-    setBusy(true); setHint(t('addAccount.submitting2fa'))
+    setBusy(true); setHint('Đang gửi mật khẩu 2FA...')
     try {
       await Endpoints.signIn2fa(phone, pwd)
-      toast.success(t('addAccount.accountAdded2fa'))
+      toast.success('Đã thêm tài khoản có 2FA!')
       onAdded?.()
     } catch (e) {
       toast.error(e.message)
@@ -146,7 +144,7 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
         if (s === 'authorized') {
           stopPolling()
           setQrState('authorized')
-          toast.success(t('addAccount.accountAddedQr'))
+          toast.success('Đã thêm tài khoản bằng mã QR!')
           onAdded?.()
         } else if (s === 'needs_2fa') {
           stopPolling()
@@ -157,7 +155,7 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
         } else if (s === 'error') {
           stopPolling()
           setQrState('error')
-          setQrError(r?.error || t('addAccount.telegramError'))
+          setQrError(r?.error || 'Telegram trả về lỗi')
         }
       } catch (e) {
         // network errors during poll: keep trying, but surface persistent failures
@@ -167,11 +165,11 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
 
   async function submitQr2fa() {
     if (!qr2faPwd || !qrIdRef.current) return
-    setBusy(true); setHint(t('addAccount.submitting2fa'))
+    setBusy(true); setHint('Đang gửi mật khẩu 2FA...')
     try {
       const r = await Endpoints.qrSignIn2fa(qrIdRef.current, qr2faPwd)
       if (r?.state === 'authorized') {
-        toast.success(t('addAccount.accountAdded2fa'))
+        toast.success('Đã thêm tài khoản có 2FA!')
         onAdded?.()
       }
     } catch (e) {
@@ -189,22 +187,22 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
 
   async function importSessionFiles() {
     if (sessionFiles.length === 0) {
-      toast.error(t('addAccount.pickSessionsError'))
+      toast.error('Hãy chọn ít nhất một tệp .session')
       return
     }
     setBusy(true)
-    setHint(t('addAccount.importingSessions', { count: sessionFiles.length }))
+    setHint(`Đang nhập ${sessionFiles.length} tệp phiên...`)
     setSessionResult(null)
     try {
       const r = await Endpoints.importSessions(sessionFiles)
       setSessionResult(r)
       if ((r.success || 0) > 0) {
-        toast.success(t('addAccount.importedAccounts', { count: r.success }))
+        toast.success(`Đã nhập ${r.success} tài khoản`)
         onImported?.()
       }
       const needsAttention = (r.failed || 0) + (r.skipped || 0)
       if (needsAttention > 0) {
-        toast.info(t('addAccount.needAttention', { count: needsAttention }))
+        toast.info(`${needsAttention} tệp phiên cần xử lý`)
       }
     } catch (e) {
       toast.error(e.message)
@@ -216,20 +214,20 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
 
   async function scanSessionsFolder() {
     setBusy(true)
-    setHint(t('addAccount.scanningFolder'))
+    setHint('Đang quét thư mục phiên...')
     setSessionResult(null)
     try {
       const r = await Endpoints.syncSessionsFolder()
       setSessionResult(r)
       if ((r.success || 0) > 0) {
-        toast.success(t('addAccount.addedSessions', { count: r.success }))
+        toast.success(`Đã thêm ${r.success} phiên từ thư mục`)
         onImported?.()
       } else if ((r.failed || 0) === 0) {
-        toast.info(t('addAccount.noNewSessions'))
+        toast.info('Không tìm thấy phiên mới trong thư mục')
       }
       const needsAttention = (r.failed || 0) + (r.skipped || 0)
       if (needsAttention > 0) {
-        toast.info(t('addAccount.reportedSessions', { count: needsAttention }))
+        toast.info(`${needsAttention} tệp phiên có cảnh báo`)
       }
     } catch (e) {
       toast.error(e.message)
@@ -259,7 +257,7 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
       <div className="nb-card p-6 w-full max-w-2xl max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-extrabold uppercase tracking-tight text-xl">
-            {t('addAccount.title')} {step === 3 && method === 'phone' && <span className="nb-badge bg-brand-violet text-black ml-2">2FA</span>}
+            Thêm tài khoản {step === 3 && method === 'phone' && <span className="nb-badge bg-brand-violet text-black ml-2">2FA</span>}
             {method === 'qr' && qrState === 'needs_2fa' && <span className="nb-badge bg-brand-violet text-black ml-2">2FA</span>}
           </h2>
           <button className="nb-btn !py-1 !px-2" onClick={close}>✕</button>
@@ -269,53 +267,53 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
           <button
             className={`nb-tab flex-1 ${method === 'phone' ? 'nb-tab-active' : ''}`}
             onClick={() => setMethod('phone')}
-          >{t('addAccount.tabPhone')}</button>
+          >Số điện thoại</button>
           <button
             className={`nb-tab flex-1 ${method === 'qr' ? 'nb-tab-active' : ''}`}
             onClick={() => setMethod('qr')}
-          >{t('addAccount.tabQr')}</button>
+          >Mã QR</button>
           <button
             className={`nb-tab flex-1 ${method === 'session' ? 'nb-tab-active' : ''}`}
             onClick={() => setMethod('session')}
-          >{t('addAccount.tabSession')}</button>
+          >Tệp phiên</button>
         </div>
 
         {method === 'phone' && step === 1 && (
           <div className="space-y-3">
             <label className="block">
-              <div className="text-xs font-bold uppercase mb-1">{t('addAccount.phoneLabel')}</div>
+              <div className="text-xs font-bold uppercase mb-1">Số điện thoại (kèm mã quốc gia)</div>
               <input
                 className="nb-input"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder={t('addAccount.phonePlaceholder')}
+                placeholder="+8801712345678"
                 autoFocus
                 onKeyDown={(e) => { if (e.key === 'Enter') sendCode() }}
               />
             </label>
             <button className="nb-btn-pri w-full" disabled={busy} onClick={sendCode}>
-              {busy ? t('addAccount.sendCodeBusy') : t('addAccount.sendCode')}
+              {busy ? 'Đang gửi…' : 'Gửi mã'}
             </button>
           </div>
         )}
 
         {method === 'phone' && step === 2 && (
           <div className="space-y-3">
-            <div className="text-sm">{t('addAccount.otpSent')} <span className="font-mono">{phone}</span></div>
+            <div className="text-sm">Đã gửi OTP tới <span className="font-mono">{phone}</span></div>
             <input
               className="nb-input"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder={t('addAccount.codePlaceholder')}
+              placeholder="Mã đăng nhập"
               autoFocus
               inputMode="numeric"
               onKeyDown={(e) => { if (e.key === 'Enter') submitCode() }}
             />
             <button className="nb-btn-pri w-full" disabled={busy || !code} onClick={submitCode}>
-              {busy ? t('addAccount.verifying') : t('addAccount.verifyCode')}
+              {busy ? 'Đang xác minh…' : 'Xác minh mã'}
             </button>
             <button className="nb-btn w-full" disabled={busy} onClick={() => setStep(1)}>
-              {t('addAccount.backResend')}
+              Quay lại / Gửi lại
             </button>
           </div>
         )}
@@ -323,22 +321,22 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
         {method === 'phone' && step === 3 && (
           <div className="space-y-3">
             <div className="nb-card-sm p-3 bg-brand-violet text-black text-sm font-bold">
-              {t('addAccount.twoFaEnabled')} <span className="font-mono">{phone}</span>
+              Đã bật 2FA. Nhập mật khẩu xác thực 2 bước cho <span className="font-mono">{phone}</span>
             </div>
             <input
               type="password"
               className="nb-input"
               value={pwd}
               onChange={(e) => setPwd(e.target.value)}
-              placeholder={t('addAccount.telegram2faPwd')}
+              placeholder="Mật khẩu 2FA Telegram"
               autoFocus
               onKeyDown={(e) => { if (e.key === 'Enter') submit2fa() }}
             />
             <button className="nb-btn-pri w-full" disabled={busy || !pwd} onClick={submit2fa}>
-              {busy ? t('addAccount.submitting') : t('addAccount.submit2fa')}
+              {busy ? 'Đang gửi…' : 'Xác nhận 2FA'}
             </button>
             <div className="text-[10px] opacity-60">
-              {t('addAccount.twoFaRetryHint')}
+              Sai mật khẩu? Bạn có thể thử lại mà không cần gửi lại mã.
             </div>
           </div>
         )}
@@ -346,35 +344,35 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
         {method === 'qr' && qrState !== 'needs_2fa' && (
           <div className="space-y-3">
             <ol className="text-xs space-y-1 opacity-80 list-decimal pl-4">
-              <li>{t('addAccount.qrStep1')}</li>
-              <li>{t('addAccount.qrStep2')}</li>
-              <li>{t('addAccount.qrStep3')}</li>
+              <li>Mở Telegram trên điện thoại</li>
+              <li>Vào <b>Cài đặt → Thiết bị → Liên kết thiết bị máy tính</b></li>
+              <li>Quét mã bên dưới</li>
             </ol>
 
             <div className="flex items-center justify-center bg-white rounded p-3 border-2 border-black min-h-[280px]">
               {qrImg ? (
-                <img src={qrImg} alt={t('addAccount.tabQr')} width="260" height="260" />
+                <img src={qrImg} alt="Mã QR Telegram" width="260" height="260" />
               ) : (
-                <div className="text-xs opacity-60">{busy ? t('addAccount.generatingQr') : t('addAccount.noCodeYet')}</div>
+                <div className="text-xs opacity-60">{busy ? 'Đang tạo mã QR…' : 'Chưa có mã'}</div>
               )}
             </div>
 
             {qrState === 'waiting' && (
-              <div className="text-xs opacity-70 text-center">{t('addAccount.waitingScan')}</div>
+              <div className="text-xs opacity-70 text-center">Đang chờ quét mã…</div>
             )}
             {qrState === 'expired' && (
               <div className="nb-card-sm p-2 bg-yellow-200 text-black text-xs font-bold text-center">
-                {t('addAccount.qrExpired')}
+                Mã QR đã hết hạn. Bấm Tạo lại mã để lấy mã mới.
               </div>
             )}
             {qrState === 'error' && (
               <div className="nb-card-sm p-2 bg-red-300 text-black text-xs font-bold">
-                {qrError || t('addAccount.somethingWrong')}
+                {qrError || 'Đã xảy ra lỗi'}
               </div>
             )}
 
             <button className="nb-btn w-full" disabled={busy} onClick={refreshQr}>
-              {busy ? t('addAccount.working') : t('addAccount.refreshCode')}
+              {busy ? 'Đang xử lý…' : 'Tạo lại mã'}
             </button>
           </div>
         )}
@@ -382,19 +380,19 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
         {method === 'qr' && qrState === 'needs_2fa' && (
           <div className="space-y-3">
             <div className="nb-card-sm p-3 bg-brand-violet text-black text-sm font-bold">
-              {t('addAccount.qrNeeds2fa')}
+              Đã quét QR. Tài khoản này có 2FA — hãy nhập mật khẩu xác thực 2 bước.
             </div>
             <input
               type="password"
               className="nb-input"
               value={qr2faPwd}
               onChange={(e) => setQr2faPwd(e.target.value)}
-              placeholder={t('addAccount.telegram2faPwd')}
+              placeholder="Mật khẩu 2FA Telegram"
               autoFocus
               onKeyDown={(e) => { if (e.key === 'Enter') submitQr2fa() }}
             />
             <button className="nb-btn-pri w-full" disabled={busy || !qr2faPwd} onClick={submitQr2fa}>
-              {busy ? t('addAccount.submitting') : t('addAccount.submit2fa')}
+              {busy ? 'Đang gửi…' : 'Xác nhận 2FA'}
             </button>
           </div>
         )}
@@ -402,11 +400,11 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
         {method === 'session' && (
           <div className="space-y-3">
             <div className="text-sm opacity-80">
-              {t('addAccount.sessionIntro')}
+              Nhập một hoặc nhiều tệp Telethon <span className="font-mono">.session</span>, hoặc chép chúng vào thư mục phiên rồi quét. Nếu một tệp lỗi, các tệp còn lại vẫn tiếp tục được nhập.
             </div>
 
             <label className="block">
-              <div className="text-xs font-bold uppercase mb-1">{t('addAccount.sessionFilesLabel')}</div>
+              <div className="text-xs font-bold uppercase mb-1">Tệp phiên</div>
               <input
                 type="file"
                 className="nb-input"
@@ -429,31 +427,31 @@ export default function AddAccountModal({ onClose, onAdded, onImported }) {
             )}
 
             <button className="nb-btn-pri w-full" disabled={busy || sessionFiles.length === 0} onClick={importSessionFiles}>
-              {busy ? t('addAccount.importingSessions', { count: sessionFiles.length }) : t('addAccount.importBtn', { count: sessionFiles.length })}
+              {busy ? 'Đang nhập...' : `Nhập ${sessionFiles.length || ''} tệp .session`}
             </button>
 
             <button className="nb-btn-info w-full" disabled={busy} onClick={scanSessionsFolder}>
-              {t('addAccount.scanFolder')}
+              Quét thư mục phiên đã chép vào
             </button>
 
             {sessionResult && (
               <div className="space-y-2">
                 <div className="flex gap-2 flex-wrap">
-                  <span className="nb-badge bg-brand-ok text-black">{t('addAccount.importedBadge', { count: sessionResult.success || 0 })}</span>
-                  <span className="nb-badge bg-brand-err text-black">{t('addAccount.failedBadge', { count: sessionResult.failed || 0 })}</span>
-                  <span className="nb-badge bg-brand-warn text-black">{t('addAccount.skippedBadge', { count: sessionResult.skipped || 0 })}</span>
+                  <span className="nb-badge bg-brand-ok text-black">{sessionResult.success || 0} đã nhập</span>
+                  <span className="nb-badge bg-brand-err text-black">{sessionResult.failed || 0} lỗi</span>
+                  <span className="nb-badge bg-brand-warn text-black">{sessionResult.skipped || 0} bỏ qua</span>
                 </div>
                 <div className="space-y-1 max-h-64 overflow-auto">
                   {(sessionResult.results || []).map((r, i) => (
                     <div key={`${r.filename}-${i}`} className="nb-card-sm p-2 text-sm flex items-center gap-2">
                       <span className={'nb-badge text-black ' + (r.status === 'ok' ? 'bg-brand-ok' : r.status === 'skipped' ? 'bg-brand-warn' : 'bg-brand-err')}>
-                        {t(r.status === 'ok' ? 'progress.statusOk' : r.status === 'skipped' ? 'progress.statusSkipped' : 'progress.statusFailed')}
+                        {jobStatusVi(r.status)}
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="font-bold truncate">{r.name || r.phone || r.filename}</div>
                         <div className="font-mono text-[11px] opacity-70 truncate">{r.filename}{r.phone ? ` - ${r.phone}` : ''}</div>
                       </div>
-                      {rowText(r) && <div className="text-xs opacity-75 max-w-[45%] truncate" title={rowText(r)}>{rowText(r)}</div>}
+                      {r.detail && <div className="text-xs opacity-75 max-w-[45%] truncate" title={r.detail}>{r.detail}</div>}
                     </div>
                   ))}
                 </div>

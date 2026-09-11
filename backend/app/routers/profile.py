@@ -13,17 +13,21 @@ from ..db import get_db
 from ..models import Account
 from ..schemas import AccountOut, ProfileUpdateIn, UsernameUpdateIn, UsernameCheckOut
 from ..tg_manager import manager
-from ..uploads import ensure_image_upload, read_limited, sanitize_filename, validate_image_bytes, IMAGE_MAX_BYTES
-from ..utils import friendly_error
+from ..utils import read_upload_limited, friendly_error
+from ..audit import log_audit
 from .accounts import _account_to_out
 
 router = APIRouter(prefix="/api/accounts/{account_id}/profile", tags=["profile"])
+
+MAX_PROFILE_PHOTO_BYTES = 10 * 1024 * 1024
+ALLOWED_PROFILE_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
 
 
 def _client_or_404(account_id: int):
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account is not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     return cli
 
 
@@ -31,7 +35,7 @@ def _client_or_404(account_id: int):
 async def update_profile(account_id: int, body: ProfileUpdateIn, db: AsyncSession = Depends(get_db)):
     acc = await db.get(Account, account_id)
     if not acc:
-        raise HTTPException(404, "Account not found")
+        raise HTTPException(404, "Không tìm thấy tài khoản")
     cli = _client_or_404(account_id)
     try:
         kw = {}
@@ -41,23 +45,18 @@ async def update_profile(account_id: int, body: ProfileUpdateIn, db: AsyncSessio
             kw["last_name"] = body.last_name
         if body.bio is not None:
             if len(body.bio) > 70:
-                raise HTTPException(400, "Bio max 70 chars")
+                raise HTTPException(400, "Tiểu sử tối đa 70 ký tự")
             kw["about"] = body.bio
         if kw:
-            await manager.run_account_action(
-                account_id,
-                lambda: cli(UpdateProfileRequest(**kw)),
-                operation="update_profile",
-            )
+            await cli(UpdateProfileRequest(**kw))
         if body.first_name is not None: acc.first_name = body.first_name
         if body.last_name is not None: acc.last_name = body.last_name
         if body.bio is not None: acc.bio = body.bio
         await db.commit()
         await db.refresh(acc)
+        await log_audit("profile:update", account_id, {"fields": list(kw.keys())})
     except FloodWaitError as e:
-        raise HTTPException(429, f"FloodWait: wait {e.seconds}s")
-    except HTTPException:
-        raise
+        raise HTTPException(429, f"FloodWait: chờ {e.seconds} giây")
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
     return await _account_to_out(acc, db)
@@ -75,31 +74,28 @@ async def check_username(account_id: int, username: str):
         return UsernameCheckOut(available=False, reason="invalid")
     except UsernameOccupiedError:
         return UsernameCheckOut(available=False, reason="occupied")
-    except Exception:
-        return UsernameCheckOut(available=False, reason="check_failed")
+    except Exception as e:
+        return UsernameCheckOut(available=False, reason=friendly_error(e)[:80])
 
 
 @router.put("/username", response_model=AccountOut)
 async def update_username(account_id: int, body: UsernameUpdateIn, db: AsyncSession = Depends(get_db)):
     acc = await db.get(Account, account_id)
     if not acc:
-        raise HTTPException(404, "Account not found")
+        raise HTTPException(404, "Không tìm thấy tài khoản")
     cli = _client_or_404(account_id)
     try:
-        await manager.run_account_action(
-            account_id,
-            lambda: cli(UpdateUsernameRequest(username=body.username)),
-            operation="update_username",
-        )
+        await cli(UpdateUsernameRequest(username=body.username))
         acc.username = body.username
         await db.commit()
         await db.refresh(acc)
+        await log_audit("profile:username", account_id, {"username": body.username})
     except UsernameOccupiedError:
-        raise HTTPException(409, "Username already taken")
+        raise HTTPException(409, "Tên người dùng đã được sử dụng")
     except UsernameInvalidError:
-        raise HTTPException(400, "Invalid username")
+        raise HTTPException(400, "Tên người dùng không hợp lệ")
     except FloodWaitError as e:
-        raise HTTPException(429, f"FloodWait: wait {e.seconds}s")
+        raise HTTPException(429, f"FloodWait: chờ {e.seconds} giây")
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
     return await _account_to_out(acc, db)
@@ -109,27 +105,27 @@ async def update_username(account_id: int, body: UsernameUpdateIn, db: AsyncSess
 async def upload_photo(account_id: int, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     acc = await db.get(Account, account_id)
     if not acc:
-        raise HTTPException(404, "Account not found")
+        raise HTTPException(404, "Không tìm thấy tài khoản")
     cli = _client_or_404(account_id)
-    ensure_image_upload(file)
-    data = await read_limited(file, IMAGE_MAX_BYTES)
-    validate_image_bytes(data)
+    suffix = os.path.splitext(file.filename or "photo.jpg")[1].lower() or ".jpg"
+    if suffix not in ALLOWED_PROFILE_PHOTO_EXTS:
+        raise HTTPException(400, "Ảnh hồ sơ phải là JPG, PNG hoặc WEBP")
+    try:
+        data = await read_upload_limited(file, MAX_PROFILE_PHOTO_BYTES)
+    except ValueError as exc:
+        raise HTTPException(413, str(exc))
+    if not data:
+        raise HTTPException(400, "Ảnh trống")
     # Telethon needs a file path or BinaryIO with a name
-    suffix = sanitize_filename(file.filename) or "photo.jpg"
-    suffix = os.path.splitext(suffix)[1] or ".jpg"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
     try:
-        async def _upload_photo():
-            uploaded = await cli.upload_file(tmp_path)
-            await cli(UploadProfilePhotoRequest(file=uploaded))
-
-        await manager.run_account_action(
-            account_id, _upload_photo, operation="upload_profile_photo"
-        )
+        uploaded = await cli.upload_file(tmp_path)
+        await cli(UploadProfilePhotoRequest(file=uploaded))
+        await log_audit("profile:photo", account_id, {"file_type": suffix})
     except FloodWaitError as e:
-        raise HTTPException(429, f"FloodWait: wait {e.seconds}s")
+        raise HTTPException(429, f"FloodWait: chờ {e.seconds} giây")
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
     finally:

@@ -1,108 +1,102 @@
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+
 from .config import settings
-from .config import PROJECT_ROOT
 
 
 class Base(DeclarativeBase):
     pass
 
 
-_is_sqlite = settings.DB_URL.startswith("sqlite")
-# For SQLite, give writers a busy timeout so concurrent startup writes (many
-# accounts connecting at once) wait for the file lock instead of raising
-# "database is locked".
-_connect_args = {"timeout": 30} if _is_sqlite else {}
+_database_url = settings.database_url
+_is_sqlite = _database_url.startswith("sqlite")
 
-engine = create_async_engine(settings.DB_URL, echo=False, future=True, connect_args=_connect_args)
+_engine_kwargs = {
+    "echo": False,
+    "future": True,
+}
+if _is_sqlite:
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+else:
+    _engine_kwargs.update({
+        "pool_pre_ping": True,
+        "pool_size": max(1, min(50, int(settings.DB_POOL_SIZE))),
+        "max_overflow": max(0, min(50, int(settings.DB_MAX_OVERFLOW))),
+        "pool_timeout": max(1.0, min(120.0, float(settings.DB_POOL_TIMEOUT_SECONDS))),
+        "pool_recycle": max(60, min(86400, int(settings.DB_POOL_RECYCLE_SECONDS))),
+        "pool_use_lifo": True,
+    })
+
+engine = create_async_engine(_database_url, **_engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 if _is_sqlite:
     @event.listens_for(engine.sync_engine, "connect")
     def _set_sqlite_pragmas(dbapi_conn, _record):
-        # WAL lets readers and a writer coexist; busy_timeout backs up the
-        # connect_args timeout; NORMAL sync is the standard WAL pairing.
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA busy_timeout=30000")
         cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA foreign_keys=ON")
         cur.close()
 
 
-async def init_db():
-    """Pre-migration hooks. Kept minimal: the authoritative schema now lives in
-    Django-style Alembic migrations (see run_migrations). Legacy databases that
-    predate Alembic are stamped to the baseline instead of being re-created."""
-    pass
 
 
-async def run_migrations():
-    """Upgrade the local schema to the bundled Alembic head revision.
-
-    Standardized bootstrap so a 2nd (or later) migration is safe:
-      - A truly empty database: `upgrade head` runs the baseline DDL (0001)
-        followed by any newer revisions -> full schema, tracked by Alembic.
-      - A pre-existing database with tables but no alembic_version (created by
-        the old ``create_all`` flow): stamp the *baseline* revision only, then
-        `upgrade head` so new revisions build on the assumed-baseline tables
-        instead of failing with "duplicate column" (which is what would happen
-        if create_all continued to build from the *latest* models).
-    """
-    import asyncio
-    from alembic import command
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
-    from sqlalchemy import create_engine, inspect as sa_inspect
-
-    config = Config(str(PROJECT_ROOT / "backend" / "alembic.ini"))
-    script = ScriptDirectory.from_config(config)
-    root_rev = None
-    for rev in script.walk_revisions():
-        if rev.down_revision is None:
-            root_rev = rev.revision
-            break
-
-    def _stamp_legacy_if_needed():
-        """Stamp a pre-Alembic database to the baseline so migrations can run."""
-        engine = create_engine(settings.DB_URL.replace("+aiosqlite", ""))
-        try:
-            insp = sa_inspect(engine)
-            tables = insp.get_table_names()
-            if "accounts" in tables and "alembic_version" not in tables:
-                command.stamp(config, root_rev or "head")
-        finally:
-            engine.dispose()
-
-    def _upgrade():
-        command.upgrade(config, "head")
-
-    await asyncio.to_thread(_stamp_legacy_if_needed)
-    await asyncio.to_thread(_upgrade)
+_INSTANCE_LOCK_ID = 77177364013717
+_instance_lock_conn = None
 
 
-async def check_database_integrity() -> tuple[bool, str]:
-    """Run SQLite's lightweight startup integrity check."""
-    if not _is_sqlite:
-        return True, "ok"
+async def acquire_instance_lock() -> bool:
+    """Hold a PostgreSQL advisory lock for the lifetime of this app process."""
+    global _instance_lock_conn
+    if _is_sqlite or not settings.ENFORCE_SINGLE_INSTANCE:
+        return True
+    if _instance_lock_conn is not None:
+        return True
+    conn = await engine.connect()
     try:
-        async with engine.connect() as conn:
-            result = await conn.exec_driver_sql("PRAGMA quick_check")
-            rows = [str(row[0]) for row in result.fetchall()]
-        ok = rows == ["ok"]
-        return ok, "ok" if ok else "; ".join(rows[:10])
-    except Exception as exc:
-        return False, type(exc).__name__
+        acquired = bool(await conn.scalar(
+            text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": _INSTANCE_LOCK_ID},
+        ))
+        if not acquired:
+            raise RuntimeError(
+                "Another Multi TG Manager instance already holds the production database lock. "
+                "Use exactly one application replica for this account set."
+            )
+        _instance_lock_conn = conn
+        return True
+    except Exception:
+        await conn.close()
+        raise
 
 
-async def shutdown_db():
-    """Flush SQLite WAL state and close pooled connections cleanly."""
+async def release_instance_lock() -> None:
+    global _instance_lock_conn
+    conn = _instance_lock_conn
+    _instance_lock_conn = None
+    if conn is None:
+        return
     try:
-        if _is_sqlite:
-            async with engine.begin() as conn:
-                await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        await conn.execute(
+            text("SELECT pg_advisory_unlock(:key)"),
+            {"key": _INSTANCE_LOCK_ID},
+        )
     finally:
-        await engine.dispose()
+        await conn.close()
+
+
+async def init_db():
+    """Validate database connectivity only. Schema ownership belongs to Alembic."""
+    await check_db()
+
+
+async def check_db() -> bool:
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    return True
 
 
 async def get_db():

@@ -1,8 +1,8 @@
 export default function ConfirmModal({
-  title = 'Are you sure?',
+  title = 'Bạn có chắc không?',
   message,
-  confirmLabel = 'Yes',
-  cancelLabel = 'No',
+  confirmLabel = 'Có',
+  cancelLabel = 'Không',
   danger = false,
   onConfirm,
   onCancel,

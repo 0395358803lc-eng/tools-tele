@@ -1,32 +1,6 @@
 from datetime import datetime
 from typing import Optional, Any
-from pydantic import BaseModel, Field, field_validator
-
-
-def _normalize_phone(value: str) -> str:
-    import re
-    digits = re.sub(r"\D", "", value or "")
-    if not digits or len(digits) > 15:
-        raise ValueError("Invalid phone number")
-    return f"+{digits}"
-
-
-class AccountIdsIn(BaseModel):
-    account_ids: list[int] = Field(min_length=1, max_length=100)
-
-    @field_validator("account_ids")
-    @classmethod
-    def _dedupe_account_ids(cls, values):
-        return list(dict.fromkeys(values))
-
-
-class NonEmptyTargetIn(BaseModel):
-    @field_validator("target", check_fields=False)
-    @classmethod
-    def _target_not_blank(cls, value):
-        if not value or not value.strip():
-            raise ValueError("Telegram target must not be empty")
-        return value.strip()
+from pydantic import BaseModel, Field
 
 
 class AccountOut(BaseModel):
@@ -39,8 +13,12 @@ class AccountOut(BaseModel):
     bio: str = ""
     status: str
     has_2fa: bool
-    is_online: bool
-    last_seen: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
+    last_ping_at: Optional[datetime] = None
+    flood_wait_until: Optional[datetime] = None
+    last_error_type: Optional[str] = None
+    last_error: Optional[str] = None
+    reconnect_count: int = 0
     unread_security: int = 0
 
     class Config:
@@ -72,21 +50,17 @@ class StatsOut(BaseModel):
 
 
 class SendCodeIn(BaseModel):
-    phone: str = Field(max_length=64)
-
-    _phone_normalized = field_validator("phone")(_normalize_phone)
+    phone: str
 
 
 class SignInIn(BaseModel):
-    phone: str = Field(max_length=64)
-    code: str = Field(default="", max_length=16)
-    password: Optional[str] = Field(default=None, max_length=256)
-
-    _phone_normalized = field_validator("phone")(_normalize_phone)
+    phone: str
+    code: str
+    password: Optional[str] = None
 
 
 class RemoveAllAccountsIn(BaseModel):
-    password: str = Field(min_length=1, max_length=256)
+    password: str
 
 
 class QrStartOut(BaseModel):
@@ -101,17 +75,17 @@ class QrPollIn(BaseModel):
 
 class QrSubmit2faIn(BaseModel):
     qr_id: str
-    password: str = Field(max_length=256)
+    password: str
 
 
 class ProfileUpdateIn(BaseModel):
-    first_name: Optional[str] = Field(default=None, max_length=64)
-    last_name: Optional[str] = Field(default=None, max_length=64)
-    bio: Optional[str] = Field(default=None, max_length=70)
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    bio: Optional[str] = None
 
 
 class UsernameUpdateIn(BaseModel):
-    username: str = Field(max_length=32)
+    username: str
 
 
 class UsernameCheckOut(BaseModel):
@@ -119,20 +93,21 @@ class UsernameCheckOut(BaseModel):
     reason: str = ""
 
 
-class BulkProfileIn(AccountIdsIn):
-    first_name: Optional[str] = Field(default=None, max_length=64)
-    last_name: Optional[str] = Field(default=None, max_length=64)
-    username: Optional[str] = Field(default=None, max_length=32)
-    bio: Optional[str] = Field(default=None, max_length=70)
+class BulkProfileIn(BaseModel):
+    account_ids: list[int]
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    bio: Optional[str] = None
     append_number: bool = False  # if true: "Name 1", "Name 2", "username1", "username2"
     start_number: int = 1
     # Per-account overrides: {"<account_id>": {"first_name": "...", "last_name": "...", "username": "...", "bio": "..."}}
     per_account: Optional[dict[str, dict[str, Optional[str]]]] = None
 
 
-class BulkPhotoIn(AccountIdsIn):
+class BulkPhotoIn(BaseModel):
+    account_ids: list[int]
     # image is uploaded separately as multipart
-    pass
 
 
 class SecurityMessageOut(BaseModel):
@@ -159,12 +134,13 @@ class TgSessionOut(BaseModel):
     is_current: bool = False
 
 
-class JoinIn(NonEmptyTargetIn):
-    target: str = Field(max_length=512)  # username or invite link
+class JoinIn(BaseModel):
+    target: str  # username or invite link
 
 
-class BulkJoinIn(AccountIdsIn, NonEmptyTargetIn):
-    target: str = Field(max_length=512)
+class BulkJoinIn(BaseModel):
+    account_ids: list[int]
+    target: str
 
 
 class GroupOut(BaseModel):
@@ -180,61 +156,71 @@ class LeaveIn(BaseModel):
     chat_id: int
 
 
-class BulkLeaveIn(AccountIdsIn):
+class BulkLeaveIn(BaseModel):
+    account_ids: list[int]
     chat_id: int
 
 
-class BulkLeaveTargetIn(AccountIdsIn, NonEmptyTargetIn):
+class BulkLeaveTargetIn(BaseModel):
     """Leave ONE specific group/channel (by @username or invite link) from every
     selected account that is currently a member of it."""
-    target: str = Field(max_length=512)
+    account_ids: list[int]
+    target: str
 
 
-class BulkLeaveAllIn(AccountIdsIn):
+class BulkLeaveAllIn(BaseModel):
     """Leave EVERY group/channel each account is in."""
+    account_ids: list[int]
+    confirm: bool = False
 
 
-class BulkDeleteMyMessagesIn(AccountIdsIn):
+class BulkDeleteMyMessagesIn(BaseModel):
     """Delete every message each account sent across ALL its groups/channels."""
-    max_scan: int = Field(default=2000, ge=1, le=10000)
+    account_ids: list[int]
+    max_scan: int = 2000
+    confirm: bool = False
 
 
-class SendMessageIn(NonEmptyTargetIn):
-    target: str = Field(max_length=512)
-    text: str = Field(min_length=1, max_length=4096)
+class SendMessageIn(BaseModel):
+    target: str
+    text: str
 
 
-class BulkMessageIn(AccountIdsIn, NonEmptyTargetIn):
-    target: str = Field(max_length=512)
-    text: str = Field(min_length=1, max_length=4096)
+class BulkMessageIn(BaseModel):
+    account_ids: list[int]
+    target: str
+    text: str
 
 
-class BulkWipeChatIn(AccountIdsIn, NonEmptyTargetIn):
+class BulkWipeChatIn(BaseModel):
     """Delete the ENTIRE conversation with one user/chat (by @username or t.me
     link) from every selected account: clears history for both sides (revoke)
     and removes the dialog so the chat no longer exists."""
-    target: str = Field(max_length=512)
+    account_ids: list[int]
+    target: str
+    confirm: bool = False
 
 
 class OpenChatIn(BaseModel):
     # A @username, bare username, t.me link, or tg://resolve deep link. Bot
     # referral links like t.me/Bot?start=PAYLOAD fire the bot /start so the
     # referral registers.
-    input: str = Field(min_length=1, max_length=512)
-    limit: int = Field(default=40, ge=1, le=100)
+    input: str
+    limit: int = 40
 
 
 class ChatSendIn(BaseModel):
-    peer: str = Field(min_length=1, max_length=512)
-    text: str = Field(min_length=1, max_length=4096)
+    peer: str   # username or numeric id (as returned by /open)
+    text: str
 
 
-class TargetUsageCheckIn(NonEmptyTargetIn):
-    target: str = Field(max_length=512)
+class TargetUsageCheckIn(BaseModel):
+    target: str
 
 
-class ReactionAssignment(AccountIdsIn):
+class ReactionAssignment(BaseModel):
     emoji: str  # the alt/standard glyph (display + standard reactions)
+    account_ids: list[int]
     custom_emoji_id: Optional[int] = None  # premium custom emoji document id
 
 
@@ -243,7 +229,8 @@ class ReactIn(BaseModel):
     reactions: list[ReactionAssignment]
 
 
-class ViewPostIn(AccountIdsIn):
+class ViewPostIn(BaseModel):
+    account_ids: list[int]
     post_link: str
 
 
@@ -264,19 +251,22 @@ class AllowedReactionsOut(BaseModel):
     custom: list[AllowedCustomReaction] = Field(default_factory=list)
 
 
-class Bulk2faIn(AccountIdsIn):
-    new_password: str = Field(min_length=1, max_length=256)
-    hint: Optional[str] = Field(default="", max_length=64)
+class Bulk2faIn(BaseModel):
+    account_ids: list[int]
+    new_password: str
+    hint: Optional[str] = ""
     # Current-password attempt bank (max 5). Tried in order, after each account's
     # own remembered password, until one is accepted (5 tries max per account).
     password_bank: list[str] = Field(default_factory=list)
 
 
 class SettingsIn(BaseModel):
-    rate_min: float = Field(ge=0, le=3600)
-    rate_max: float = Field(ge=0, le=3600)
-    concurrency: int = Field(default=5, ge=1, le=100)
+    rate_min: float
+    rate_max: float
+    concurrency: int = 5
+    sessions_dir: str
     auto_reconnect: bool
+    notification_sound: bool
 
 
 class SettingsOut(SettingsIn):

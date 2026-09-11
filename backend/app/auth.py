@@ -1,22 +1,25 @@
-"""Password auth: bcrypt-verified password, itsdangerous-signed cookie, IP rate limit."""
+"""Dashboard password authentication backed by revocable SQL sessions."""
 from __future__ import annotations
+
 import asyncio
 import hashlib
-import time
 import secrets
-from collections import defaultdict, deque
+from datetime import datetime, timedelta
 from typing import Optional
 
 import bcrypt
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
-from itsdangerous import TimestampSigner, BadSignature, SignatureExpired
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from .time_utils import utcnow
 from .config import settings
+from .db import AsyncSessionLocal, get_db
+from .models import AppSession, LoginAttempt
+from .audit import log_audit
 
 COOKIE_NAME = "mtm_session"
-
-# --- bcrypt hash cache (compute once per process) ---
 _pw_hash: Optional[bytes] = None
 
 
@@ -24,135 +27,152 @@ def _password_hash() -> bytes:
     global _pw_hash
     if _pw_hash is None:
         if not settings.APP_PASSWORD:
-            raise RuntimeError("APP_PASSWORD not set in .env")
-        # Pre-hash so bcrypt's 72-byte input ceiling cannot make a valid
-        # (especially Unicode) configured password impossible to verify.
-        material = hashlib.sha256(settings.APP_PASSWORD.encode("utf-8")).digest()
-        _pw_hash = bcrypt.hashpw(material, bcrypt.gensalt(rounds=12))
+            raise RuntimeError("Chưa cấu hình APP_PASSWORD")
+        _pw_hash = bcrypt.hashpw(settings.APP_PASSWORD.encode(), bcrypt.gensalt(rounds=12))
     return _pw_hash
 
 
-def _verify_password(pw: str) -> bool:
-    if not pw:
+def _verify_password(password: str) -> bool:
+    if not password:
         return False
     try:
-        material = hashlib.sha256(pw.encode("utf-8")).digest()
-        return bcrypt.checkpw(material, _password_hash())
+        return bcrypt.checkpw(password.encode(), _password_hash())
     except Exception:
         return False
 
 
-def verify_app_password(pw: str) -> bool:
-    return _verify_password(pw)
+def verify_app_password(password: str) -> bool:
+    return _verify_password(password)
 
 
-# --- signer ---
-_signer: Optional[TimestampSigner] = None
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _get_signer() -> TimestampSigner:
-    global _signer
-    if _signer is None:
-        secret = settings.SESSION_SECRET
-        if not secret or len(secret) < 48:
-            raise RuntimeError("SESSION_SECRET not set or too short (min 48 chars) in .env")
-        _signer = TimestampSigner(secret, salt="mtm-session-v1")
-    return _signer
+def _client_ip(request: Request) -> str:
+    if settings.TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()[:128]
+    return (request.client.host if request.client else "unknown")[:128]
 
 
-def _make_token() -> str:
-    return _get_signer().sign(secrets.token_urlsafe(24)).decode()
-
-
-def _verify_token(token: str) -> bool:
-    if not token:
-        return False
-    try:
-        max_age = max(1, settings.SESSION_DAYS) * 86400
-        _get_signer().unsign(token, max_age=max_age)
+def _cookie_secure(request: Request) -> bool:
+    if settings.COOKIE_SECURE or request.url.scheme == "https":
         return True
-    except (BadSignature, SignatureExpired):
-        return False
-    except Exception:
-        return False
+    if settings.TRUST_PROXY_HEADERS:
+        return request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+    return False
 
 
-# --- rate limit: per-IP sliding window ---
-_attempts: dict[str, deque[float]] = defaultdict(deque)
+async def _find_session(token: str) -> AppSession | None:
+    if not token:
+        return None
+    now = utcnow()
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(
+            select(AppSession).where(
+                AppSession.token_hash == _token_hash(token),
+                AppSession.revoked_at.is_(None),
+                AppSession.expires_at > now,
+            )
+        )
+        row = res.scalar_one_or_none()
+        if row:
+            row.last_seen_at = now
+            await db.commit()
+        return row
 
 
-def _check_rate(ip: str) -> tuple[bool, int]:
-    """Return (allowed, remaining_seconds_if_blocked)."""
-    window = settings.LOGIN_WINDOW_MIN * 60
-    now = time.time()
-    dq = _attempts[ip]
-    while dq and now - dq[0] > window:
-        dq.popleft()
-    if len(dq) >= settings.LOGIN_MAX_ATTEMPTS:
-        oldest = dq[0]
-        remaining = int(window - (now - oldest))
-        return False, max(remaining, 1)
-    return True, 0
-
-
-def _record_failed(ip: str):
-    _attempts[ip].append(time.time())
-
-
-def _client_ip(req: Request) -> str:
-    fwd = req.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return req.client.host if req.client else "unknown"
-
-
-# --- FastAPI dependency ---
 async def require_auth(request: Request, mtm_session: str = Cookie(None)):
-    if not _verify_token(mtm_session or ""):
-        raise HTTPException(401, "Not authenticated")
+    session = await _find_session(mtm_session or "")
+    if not session:
+        raise HTTPException(401, "Chưa đăng nhập")
     return True
 
 
-# --- router ---
+async def _check_rate(db: AsyncSession, ip: str) -> tuple[bool, int]:
+    now = utcnow()
+    cutoff = now - timedelta(minutes=max(1, settings.LOGIN_WINDOW_MIN))
+    await db.execute(delete(LoginAttempt).where(LoginAttempt.attempted_at < cutoff))
+    res = await db.execute(
+        select(LoginAttempt).where(
+            LoginAttempt.ip == ip,
+            LoginAttempt.success.is_(False),
+            LoginAttempt.attempted_at >= cutoff,
+        ).order_by(LoginAttempt.attempted_at.asc())
+    )
+    rows = res.scalars().all()
+    if len(rows) >= max(1, settings.LOGIN_MAX_ATTEMPTS):
+        remaining = int((rows[0].attempted_at + timedelta(minutes=settings.LOGIN_WINDOW_MIN) - now).total_seconds())
+        return False, max(1, remaining)
+    return True, 0
+
+
+async def cleanup_auth_state() -> None:
+    """Remove expired dashboard sessions and old login-attempt rows."""
+    now = utcnow()
+    cutoff = now - timedelta(minutes=max(1, settings.LOGIN_WINDOW_MIN))
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(AppSession).where(AppSession.expires_at <= now))
+        await db.execute(delete(LoginAttempt).where(LoginAttempt.attempted_at < cutoff))
+        await db.commit()
+
+
 router = APIRouter(prefix="/api/auth-app", tags=["auth-app"])
 
 
 class LoginIn(BaseModel):
-    password: str = Field(min_length=1, max_length=256)
+    password: str
 
 
 @router.post("/login")
-async def login(body: LoginIn, request: Request, response: Response):
+async def login(body: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     ip = _client_ip(request)
-    allowed, retry = _check_rate(ip)
+    allowed, retry = await _check_rate(db, ip)
     if not allowed:
-        raise HTTPException(429, f"Too many attempts. Try again in {retry}s.")
+        await db.commit()
+        raise HTTPException(429, f"Quá nhiều lần thử. Hãy thử lại sau {retry} giây.")
+
     if not _verify_password(body.password):
-        _record_failed(ip)
-        # constant-ish response time floor (non-blocking on the event loop)
+        db.add(LoginAttempt(ip=ip, success=False, attempted_at=utcnow()))
+        await db.commit()
         await asyncio.sleep(0.4)
-        raise HTTPException(401, "Wrong password")
-    token = _make_token()
+        raise HTTPException(401, "Mật khẩu không đúng")
+
+    now = utcnow()
+    token = secrets.token_urlsafe(48)
+    db.add(AppSession(
+        token_hash=_token_hash(token),
+        ip=ip,
+        user_agent=(request.headers.get("user-agent") or "")[:512],
+        created_at=now,
+        expires_at=now + timedelta(days=max(1, settings.SESSION_DAYS)),
+        last_seen_at=now,
+    ))
+    await db.execute(delete(LoginAttempt).where(LoginAttempt.ip == ip))
+    await db.commit()
     response.set_cookie(
-        key=COOKIE_NAME,
-        value=token,
-        max_age=settings.SESSION_DAYS * 86400,
-        httponly=True,
-        samesite="lax",
-        secure=False,  # served on localhost; set True if you put behind HTTPS
-        path="/",
+        key=COOKIE_NAME, value=token, max_age=max(1, settings.SESSION_DAYS) * 86400,
+        httponly=True, samesite="strict", secure=_cookie_secure(request), path="/",
     )
-    # clear failed attempts on success
-    _attempts[ip].clear()
+    await log_audit("auth:login")
     return {"ok": True}
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(response: Response, mtm_session: str = Cookie(None), db: AsyncSession = Depends(get_db)):
+    if mtm_session:
+        res = await db.execute(select(AppSession).where(AppSession.token_hash == _token_hash(mtm_session)))
+        row = res.scalar_one_or_none()
+        if row and row.revoked_at is None:
+            row.revoked_at = utcnow()
+            await db.commit()
     response.delete_cookie(COOKIE_NAME, path="/")
+    await log_audit("auth:logout")
     return {"ok": True}
 
 
 @router.get("/me")
 async def me(mtm_session: str = Cookie(None)):
-    return {"authed": _verify_token(mtm_session or "")}
+    return {"authed": bool(await _find_session(mtm_session or ""))}

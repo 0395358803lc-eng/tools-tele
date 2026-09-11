@@ -34,7 +34,7 @@ export default function AccountAvatar({
         <span
           className={
             'absolute -bottom-1 -right-1 w-3 h-3 border-2 border-black ' +
-            (account.is_online ? 'bg-brand-ok' : 'bg-zinc-400')
+            (account.status === 'connected' ? 'bg-brand-ok' : account.status === 'banned' ? 'bg-brand-err' : 'bg-zinc-400')
           }
         />
       )}

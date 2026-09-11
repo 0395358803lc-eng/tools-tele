@@ -13,7 +13,8 @@ from ..models import SecurityMessage, Account
 from ..schemas import SecurityMessageOut, TgSessionOut, Bulk2faIn
 from ..tg_manager import manager
 from .. import secrets_store
-from ..utils import bulk_stream, friendly_error, ok_result
+from ..utils import bulk_stream, friendly_error
+from ..audit import log_audit
 
 router = APIRouter(prefix="/api/security", tags=["security"])
 
@@ -33,9 +34,10 @@ async def list_messages(account_id: int | None = None, only_unread: bool = False
 async def mark_read(msg_id: int, db: AsyncSession = Depends(get_db)):
     m = await db.get(SecurityMessage, msg_id)
     if not m:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Không tìm thấy")
     m.is_read = True
     await db.commit()
+    await log_audit("security:message_read", m.account_id, {"security_record_id": m.id})
     return {"ok": True}
 
 
@@ -44,8 +46,13 @@ async def mark_all_read(account_id: int | None = None, db: AsyncSession = Depend
     q = update(SecurityMessage).values(is_read=True)
     if account_id is not None:
         q = q.where(SecurityMessage.account_id == account_id)
-    await db.execute(q)
+    result = await db.execute(q)
     await db.commit()
+    await log_audit(
+        "security:messages_mark_all_read",
+        account_id,
+        {"updated": int(result.rowcount or 0)},
+    )
     return {"ok": True}
 
 
@@ -55,30 +62,29 @@ async def backfill(account_id: int, limit: int = 50):
     Useful after first login (to see history) or when listener missed something."""
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
+    normalized_limit = min(max(limit, 1), 200)
     try:
-        await manager._backfill_777000(account_id, cli, limit=min(max(limit, 1), 200))
+        added = await manager._backfill_777000(account_id, cli, limit=normalized_limit)
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
-    return {"ok": True}
+    await log_audit("security:backfill", account_id, {"added": int(added or 0), "limit": normalized_limit})
+    return {"ok": True, "added": int(added or 0)}
 
 
 @router.get("/twofa_known")
 async def twofa_known():
     """How many saved 2FA passwords we have locally (used to seed bulk change)."""
-    return {"count": await secrets_store.count()}
-
-
-@router.delete("/twofa_known")
-async def clear_saved_twofa():
-    await secrets_store.clear_all()
-    return {"ok": True, "count": 0}
+    try:
+        return {"count": await secrets_store.count()}
+    except Exception:
+        return {"count": 0}
 
 
 def _is_wrong_password(e: Exception) -> bool:
     if isinstance(e, PasswordHashInvalidError):
         return True
-    return type(e).__name__ == "PasswordHashInvalidError"
+    return "PASSWORD_HASH_INVALID" in str(e).upper()
 
 
 @router.post("/bulk_2fa")
@@ -89,20 +95,18 @@ async def bulk_2fa(body: Bulk2faIn, db: AsyncSession = Depends(get_db)):
     each account's remembered password first, then up to the provided bank — at
     most 5 attempts per account — until one is accepted, then set the new one.
     """
-    new_password = body.new_password or ""
+    new_password = (body.new_password or "").strip()
     if not new_password:
-        raise HTTPException(400, "New password is required")
+        raise HTTPException(400, "Cần nhập mật khẩu mới")
     hint = (body.hint or "")[:20]
 
-    res = await db.execute(select(Account).where(Account.id.in_(body.account_ids)))
+    res = await db.execute(select(Account).where(Account.id.in_(body.account_ids), Account.deleted_at.is_(None)))
     accounts = [
         (a.id, a.phone, (f"{a.first_name or ''} {a.last_name or ''}".strip() or a.phone))
         for a in res.scalars().all()
     ]
     phone_by_id = {a[0]: a[1] for a in accounts}
-    # Telegram passwords are opaque strings: surrounding whitespace may be
-    # intentional and must never be normalized away.
-    bank = [p for p in (body.password_bank or []) if p]
+    bank = [p.strip() for p in (body.password_bank or []) if p and p.strip()]
 
     async def _set_has_2fa(account_id: int):
         async with AsyncSessionLocal() as s:
@@ -111,14 +115,14 @@ async def bulk_2fa(body: Bulk2faIn, db: AsyncSession = Depends(get_db)):
                 acc.has_2fa = True
                 await s.commit()
 
-    async def _save_warn(phone: str):
+    async def _save_warn(phone: str) -> str:
         """Persist the new password, but never let a save failure mask the fact
-        that Telegram already accepted the change. Returns a warning flag."""
+        that Telegram already accepted the change. Returns a warning suffix."""
         try:
             await secrets_store.save_2fa(phone, new_password)
-            return False
+            return ""
         except Exception:
-            return True
+            return " — lưu ý: mật khẩu đã đổi nhưng không thể lưu cục bộ"
 
     async def _change(cli, aid):
         phone = phone_by_id.get(aid, "")
@@ -128,7 +132,7 @@ async def bulk_2fa(body: Bulk2faIn, db: AsyncSession = Depends(get_db)):
             await cli.edit_2fa(new_password=new_password, hint=hint)
             warn = await _save_warn(phone)
             await _set_has_2fa(aid)
-            return ok_result("security.set2faSaveFailed" if warn else "security.set2fa")
+            return "ok", "đã bật 2FA (trước đó đang tắt)" + warn
 
         # Build the candidate bank: remembered password first, then provided ones.
         saved = await secrets_store.get_2fa(phone)
@@ -139,8 +143,8 @@ async def bulk_2fa(body: Bulk2faIn, db: AsyncSession = Depends(get_db)):
         candidates = candidates[:5]  # max 5 tries per account
         if not candidates:
             raise ValueError(
-                "No current password known for this account. Either log in with it "
-                "first (so we remember its password), or add the current password to the list above."
+                "Không có mật khẩu hiện tại đã biết cho tài khoản này. Hãy đăng nhập tài khoản trước "
+                "để hệ thống ghi nhớ mật khẩu, hoặc thêm mật khẩu hiện tại vào danh sách phía trên."
             )
 
         tried = 0
@@ -150,17 +154,16 @@ async def bulk_2fa(body: Bulk2faIn, db: AsyncSession = Depends(get_db)):
                 await cli.edit_2fa(current_password=cand, new_password=new_password, hint=hint)
                 warn = await _save_warn(phone)
                 await _set_has_2fa(aid)
-                key = "security.changed2faSaveFailed" if warn else "security.changed2fa"
-                return ok_result(key, {"tried": tried})
+                return "ok", f"đã thay đổi (lần thử {tried})" + warn
             except FloodWaitError:
                 raise  # surfaced as a clear "wait Ns" message; don't keep hammering
             except Exception as e:
                 if _is_wrong_password(e):
                     continue  # try the next candidate
                 raise
-        raise ValueError(f"None of your {tried} current password(s) worked for this account")
+        raise ValueError(f"Không có mật khẩu hiện tại nào trong {tried} lần thử phù hợp với tài khoản này")
 
-    return StreamingResponse(bulk_stream(accounts, _change), media_type="application/x-ndjson")
+    return StreamingResponse(bulk_stream(accounts, _change, job_type="change_2fa"), media_type="application/x-ndjson")
 
 
 async def _terminate_other_authorizations(cli) -> tuple[int, int]:
@@ -181,7 +184,7 @@ async def _terminate_other_authorizations(cli) -> tuple[int, int]:
 @router.post("/sessions/terminate_others_all")
 async def terminate_others_all(db: AsyncSession = Depends(get_db)):
     res = await db.execute(
-        select(Account).where(Account.status != "banned").order_by(Account.id)
+        select(Account).where(Account.deleted_at.is_(None), Account.status != "banned").order_by(Account.id)
     )
     accounts = [
         (a.id, a.phone, (f"{a.first_name or ''} {a.last_name or ''}".strip() or a.phone))
@@ -190,11 +193,13 @@ async def terminate_others_all(db: AsyncSession = Depends(get_db)):
 
     async def _terminate(cli, aid):
         killed, failed = await _terminate_other_authorizations(cli)
-        return ok_result("security.terminatedSessions",
-                         {"killed": killed, "failed": failed})
+        detail = "không có phiên nào khác" if killed == 0 else f"đã chấm dứt {killed} phiên"
+        if failed:
+            detail += f", {failed} lỗi"
+        return "ok", detail
 
     return StreamingResponse(
-        bulk_stream(accounts, _terminate),
+        bulk_stream(accounts, _terminate, job_type="terminate_other_sessions", job_parameters={}),
         media_type="application/x-ndjson",
     )
 
@@ -203,7 +208,7 @@ async def terminate_others_all(db: AsyncSession = Depends(get_db)):
 async def list_sessions(account_id: int):
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     res = await cli(GetAuthorizationsRequest())
     out = []
     for a in res.authorizations:
@@ -224,13 +229,10 @@ async def list_sessions(account_id: int):
 async def terminate_session(account_id: int, hash_id: int):
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
-        await manager.run_account_action(
-            account_id,
-            lambda: cli(ResetAuthorizationRequest(hash=hash_id)),
-            operation="terminate_session",
-        )
+        await cli(ResetAuthorizationRequest(hash=hash_id))
+        await log_audit("security:terminate_session", account_id, {"terminated": 1})
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
     return {"ok": True}
@@ -240,13 +242,10 @@ async def terminate_session(account_id: int, hash_id: int):
 async def terminate_others(account_id: int):
     cli = manager.get(account_id)
     if not cli:
-        raise HTTPException(409, "Account not connected")
+        raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
-        killed, _failed = await manager.run_account_action(
-            account_id,
-            lambda: _terminate_other_authorizations(cli),
-            operation="terminate_other_sessions",
-        )
+        killed, _failed = await _terminate_other_authorizations(cli)
+        await log_audit("security:terminate_others", account_id, {"terminated": killed})
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
     return {"ok": True, "terminated": killed}

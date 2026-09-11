@@ -1,0 +1,10 @@
+{
+  "name": "@workspace/multi-tg-manager",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "cd frontend && npm run build && cd .. && bash run-production.sh",
+    "build": "cd frontend && npm ci && npm run build",
+    "serve": "bash run-production.sh"
+  }
+}

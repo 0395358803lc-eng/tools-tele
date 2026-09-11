@@ -1,5 +1,4 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useTranslation } from 'react-i18next'
 import { Endpoints, onUnauthorized } from './lib/api'
 import { useToast } from './lib/toast.jsx'
 import { useTheme } from './lib/theme'
@@ -16,24 +15,28 @@ import MessagingTab from './tabs/MessagingTab.jsx'
 import TargetCheckTab from './tabs/TargetCheckTab.jsx'
 import BulkTab from './tabs/BulkTab.jsx'
 import SettingsTab from './tabs/SettingsTab.jsx'
+import JobsTab from './tabs/JobsTab.jsx'
+import AuditTab from './tabs/AuditTab.jsx'
+import SystemTab from './tabs/SystemTab.jsx'
 
 const TABS = [
-  { id: 'dashboard', labelKey: 'navigation.dashboard' },
-  { id: 'profile',   labelKey: 'navigation.profile'   },
-  { id: 'security',  labelKey: 'navigation.security'  },
-  { id: 'groups',    labelKey: 'navigation.groups'    },
-  { id: 'messages',  labelKey: 'navigation.messages'  },
-  { id: 'checker',   labelKey: 'navigation.checker'   },
-  { id: 'bulk',      labelKey: 'navigation.bulk'      },
-  { id: 'settings',  labelKey: 'navigation.settings'  },
+  { id: 'dashboard', label: 'Tổng quan' },
+  { id: 'profile',   label: 'Hồ sơ'   },
+  { id: 'security',  label: 'Bảo mật'  },
+  { id: 'groups',    label: 'Nhóm'    },
+  { id: 'messages',  label: 'Tin nhắn'  },
+  { id: 'checker',   label: 'Kiểm tra'   },
+  { id: 'bulk',      label: 'Hàng loạt'      },
+  { id: 'jobs',      label: 'Tác vụ'      },
+  { id: 'audit',     label: 'Nhật ký'     },
+  { id: 'system',    label: 'Hệ thống'    },
+  { id: 'settings',  label: 'Cài đặt'  },
 ]
 
 export default function App() {
-  const { t } = useTranslation()
   const toast = useToast()
   const { theme, toggle } = useTheme()
   const [authState, setAuthState] = useState('checking') // checking | in | out
-  const [health, setHealth] = useState(null)
   const [accounts, setAccounts] = useState([])
   const [gone, setGone] = useState([])  // banned/removed account history
   const [stats, setStats] = useState({ total: 0, connected: 0, banned: 0, with_2fa: 0, unread_security: 0 })
@@ -42,10 +45,10 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [addOpen, setAddOpen] = useState(false)
   const prevUnreadRef = useRef(0)
+  const [notificationSound, setNotificationSound] = useState(true)
 
   // initial auth check
   useEffect(() => {
-    Endpoints.health().then(setHealth).catch(() => setHealth({ backend: 'error', database: 'unknown' }))
     Endpoints.me()
       .then((r) => setAuthState(r?.authed ? 'in' : 'out'))
       .catch(() => setAuthState('out'))
@@ -72,7 +75,7 @@ export default function App() {
     } catch (e) {
       // Stay silent on polling failures — only show error on first-load
       if (accounts.length === 0 && !e.network && e.status !== 401) {
-        toast.error(t('common.loading') + ' accounts: ' + e.message)
+        toast.error('Tải tài khoản: ' + e.message)
       }
     }
   }, [selectedId, toast, accounts.length])
@@ -86,14 +89,25 @@ export default function App() {
       const s = await Endpoints.stats()
       setStats(s)
       if (s.unread_security > prevUnreadRef.current && prevUnreadRef.current !== 0) {
-        desktopNotify(t('nav.statusConnected') + ' · ' + t('app.title'), `Unread: ${s.unread_security}`)
+        desktopNotify('Có tin nhắn bảo mật mới', `Chưa đọc: ${s.unread_security}`, notificationSound)
       }
       prevUnreadRef.current = s.unread_security
     } catch (e) { /* silent */ }
+  }, [notificationSound])
+
+  useEffect(() => {
+    const onSettings = (e) => {
+      if (e?.detail && typeof e.detail.notification_sound === 'boolean') {
+        setNotificationSound(e.detail.notification_sound)
+      }
+    }
+    window.addEventListener('mtm-settings-updated', onSettings)
+    return () => window.removeEventListener('mtm-settings-updated', onSettings)
   }, [])
 
   useEffect(() => {
     if (authState !== 'in') return
+    Endpoints.getSettings().then((cfg) => setNotificationSound(cfg.notification_sound !== false)).catch(() => {})
     ensureNotificationPermission()
     refreshAccounts()
     refreshStats()
@@ -105,17 +119,7 @@ export default function App() {
   if (authState === 'checking') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-zinc-100 dark:bg-zinc-950">
-        <div className="nb-card-sm p-4 font-bold uppercase tracking-tight">{t('common.loading')}</div>
-      </div>
-    )
-  }
-  if (health?.database === 'error' || health?.secret_store === 'error') {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-zinc-100 dark:bg-zinc-950 p-6">
-        <div className="nb-card p-6 max-w-xl">
-          <h1 className="font-extrabold text-xl uppercase text-brand-err">Startup health problem detected</h1>
-          <p className="mt-3">Telegram clients were not started. Check database integrity and Windows DPAPI, then restore a known-good backup if needed.</p>
-        </div>
+        <div className="nb-card-sm p-4 font-bold uppercase tracking-tight">Đang tải…</div>
       </div>
     )
   }
@@ -131,14 +135,13 @@ export default function App() {
         <button onClick={() => setSidebarOpen((s) => !s)} className="nb-btn !bg-white !text-black !py-1 !px-2">
           ☰
         </button>
-        <h1 className="font-extrabold text-xl uppercase tracking-tighter">Multi TG Manager</h1>
-        {health && health.telegram_api !== 'configured' && <span className="nb-badge bg-brand-err text-black">Telegram API missing</span>}
+        <h1 className="font-extrabold text-xl uppercase tracking-tighter">Quản Lý Telegram Đa Tài Khoản</h1>
         <div className="flex-1" />
         <TopStats stats={stats} onBellClick={() => setTab('security')} />
-        <button onClick={toggle} className="nb-btn !bg-white !text-black !py-1 !px-2" title={t('app.theme')}>
+        <button onClick={toggle} className="nb-btn !bg-white !text-black !py-1 !px-2" title="Đổi giao diện">
           {theme === 'dark' ? '☀' : '☾'}
         </button>
-        <button onClick={logout} className="nb-btn !bg-white !text-black !py-1 !px-2" title={t('app.logout')}>
+        <button onClick={logout} className="nb-btn !bg-white !text-black !py-1 !px-2" title="Đăng xuất">
           ⏻
         </button>
       </header>
@@ -158,13 +161,13 @@ export default function App() {
 
         <main className="flex-1 min-w-0 flex flex-col">
           <nav className="flex gap-1 px-4 pt-3 flex-wrap border-b-2 border-black dark:border-white bg-zinc-100 dark:bg-zinc-900">
-            {TABS.map((tabItem) => (
+            {TABS.map((t) => (
               <button
-                key={tabItem.id}
-                className={`nb-tab ${tab === tabItem.id ? 'nb-tab-active' : ''}`}
-                onClick={() => setTab(tabItem.id)}
+                key={t.id}
+                className={`nb-tab ${tab === t.id ? 'nb-tab-active' : ''}`}
+                onClick={() => setTab(t.id)}
               >
-                {t(tabItem.labelKey)}
+                {t.label}
               </button>
             ))}
           </nav>
@@ -176,6 +179,9 @@ export default function App() {
             {tab === 'messages'  && <MessagingTab accounts={accounts} selected={selected} />}
             {tab === 'checker'   && <TargetCheckTab />}
             {tab === 'bulk'      && <BulkTab accounts={accounts} onDone={refreshAccounts} />}
+            {tab === 'jobs'      && <JobsTab />}
+            {tab === 'audit'     && <AuditTab />}
+            {tab === 'system'    && <SystemTab />}
             {tab === 'settings'  && <SettingsTab />}
           </div>
         </main>

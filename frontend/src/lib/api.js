@@ -1,24 +1,8 @@
 const BASE = ''  // proxied by vite
 
-import i18n from '../i18n'
-import { errText } from './err'
-
 // listeners notified when any request returns 401
 const _onUnauth = new Set()
 export function onUnauthorized(cb) { _onUnauth.add(cb); return () => _onUnauth.delete(cb) }
-
-// Localize an API error message. `msg` is the raw detail text and `body` may
-// carry `error_code`/`error_params` from the backend. Also maps the frontend's
-// own "Cannot reach server" string (it has a literal errors.* key).
-function localizeApiError(msg, body) {
-  if (body) {
-    const localized = errText(msg, body.error_code, body.error_params)
-    if (localized !== msg) return localized
-  }
-  const known = i18n.exists('errors.' + msg)
-  if (known) return i18n.t('errors.' + msg)
-  return msg
-}
 
 async function request(method, path, { json, form, query, silent } = {}) {
   let url = path
@@ -40,7 +24,7 @@ async function request(method, path, { json, form, query, silent } = {}) {
     r = await fetch(BASE + url, opts)
   } catch (netErr) {
     // network/CORS/abort — surface a cleaner message
-    const e = new Error(localizeApiError('Cannot reach server'))
+    const e = new Error('Không thể kết nối tới máy chủ')
     e.status = 0
     e.network = true
     throw e
@@ -52,7 +36,7 @@ async function request(method, path, { json, form, query, silent } = {}) {
   }
   if (!r.ok) {
     const msg = body?.detail || body?.message || `${r.status} ${r.statusText}`
-    const err = new Error(localizeApiError(typeof msg === 'string' ? msg : JSON.stringify(msg), body))
+    const err = new Error(typeof msg === 'string' ? msg : JSON.stringify(msg))
     err.status = r.status
     err.body = body
     throw err
@@ -76,14 +60,13 @@ async function streamRequest(path, init, onEvent) {
   try {
     r = await fetch(BASE + path, { credentials: 'include', ...init })
   } catch {
-    const e = new Error(localizeApiError('Cannot reach server')); e.status = 0; e.network = true; throw e
+    const e = new Error('Không thể kết nối tới máy chủ'); e.status = 0; e.network = true; throw e
   }
   if (r.status === 401) _onUnauth.forEach((fn) => { try { fn() } catch {} })
   if (!r.ok || !r.body) {
     let detail = `${r.status} ${r.statusText}`
-    let body = null
-    try { body = await r.json(); detail = body?.detail || detail } catch { /* not json */ }
-    const err = new Error(localizeApiError(typeof detail === 'string' ? detail : JSON.stringify(detail), body))
+    try { const b = await r.json(); detail = b?.detail || detail } catch { /* not json */ }
+    const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
     err.status = r.status
     throw err
   }
@@ -126,13 +109,10 @@ export function streamNDJSONForm(path, form, onEvent) {
 // Convenience endpoints
 export const Endpoints = {
   health: () => api.get('/api/health'),
+  systemStatus: () => api.get('/api/system/status'),
   stats: () => api.get('/api/stats'),
   accounts: () => api.get('/api/accounts'),
   account: (id) => api.get(`/api/accounts/${id}`),
-  connectAccount: (id) => api.post(`/api/accounts/${id}/connect`),
-  disconnectAccount: (id) => api.post(`/api/accounts/${id}/disconnect`),
-  connectAll: () => api.post('/api/accounts/connect_all'),
-  disconnectAll: () => api.post('/api/accounts/disconnect_all'),
   deleteAccount: (id) => api.del(`/api/accounts/${id}`),
   removeAllAccounts: (password) => api.post('/api/accounts/remove_all', { password }),
 
@@ -199,10 +179,10 @@ export const Endpoints = {
   // leave ONE target (by @username / invite link) from selected accounts that are members
   bulkLeaveTarget: (ids, target, onEvent) => streamNDJSON('/api/groups/bulk_leave_target', { account_ids: ids, target }, onEvent),
   // leave EVERY group/channel each selected account is in
-  bulkLeaveAll: (ids, onEvent) => streamNDJSON('/api/groups/bulk_leave_all', { account_ids: ids }, onEvent),
+  bulkLeaveAll: (ids, onEvent) => streamNDJSON('/api/groups/bulk_leave_all', { account_ids: ids, confirm: true }, onEvent),
   // delete every message each selected account sent across ALL its groups/channels
   bulkDeleteMyMessages: (ids, max_scan, onEvent) =>
-    streamNDJSON('/api/groups/bulk_delete_my_messages', { account_ids: ids, max_scan }, onEvent),
+    streamNDJSON('/api/groups/bulk_delete_my_messages', { account_ids: ids, max_scan, confirm: true }, onEvent),
   countMyMessages: (id, chat_id, max_scan = 1000) =>
     api.get(`/api/groups/${id}/my_messages_count`, { chat_id, max_scan }),
   deleteMyMessages: (id, chat_id, max_scan = 2000) =>
@@ -212,7 +192,7 @@ export const Endpoints = {
   bulkSend: (ids, target, text, onEvent) => streamNDJSON('/api/messaging/bulk_send', { account_ids: ids, target, text }, onEvent),
   // wipe the ENTIRE chat with one user (by @username / t.me link) from selected
   // accounts: clears history for both sides (revoke) and removes the dialog
-  bulkWipeChat: (ids, target, onEvent) => streamNDJSON('/api/messaging/bulk_wipe_chat', { account_ids: ids, target }, onEvent),
+  bulkWipeChat: (ids, target, onEvent) => streamNDJSON('/api/messaging/bulk_wipe_chat', { account_ids: ids, target, confirm: true }, onEvent),
 
   // Telegram-like chat panel: open by @username / t.me link (referral links
   // like t.me/Bot?start=CODE fire the bot /start), poll history, send.
@@ -220,20 +200,24 @@ export const Endpoints = {
   chatHistory: (id, peer, limit = 40) => api.get(`/api/messaging/${id}/history`, { peer, limit }),
   chatSend: (id, peer, text) => api.post(`/api/messaging/${id}/chat_send`, { peer, text }),
   targetCheck: (target) => api.post('/api/messaging/target_check', { target }),
+  targetChecks: (limit = 30) => api.get('/api/messaging/target_checks', { limit }),
+  targetCheckDetail: (id) => api.get(`/api/messaging/target_checks/${id}`),
   // which reactions this post's chat actually allows (standard + custom emoji)
   allowedReactions: (post_link, account_id) => api.post('/api/messaging/allowed_reactions', { post_link, account_id }),
   // reactions: [{ emoji, account_ids, custom_emoji_id? }]
   react: (post_link, reactions, onEvent) => streamNDJSON('/api/messaging/react', { post_link, reactions }, onEvent),
   view: (ids, post_link, onEvent) => streamNDJSON('/api/messaging/view', { account_ids: ids, post_link }, onEvent),
 
+  audit: (limit = 100, action, account_id) => api.get('/api/audit', { limit, action, account_id }),
+
+  jobs: (limit = 50) => api.get('/api/jobs', { limit }),
+  job: (id) => api.get(`/api/jobs/${id}`),
+  cancelJob: (id) => api.post(`/api/jobs/${id}/cancel`),
+  retryJob: (id, onEvent) => streamNDJSON(`/api/jobs/${id}/retry`, {}, onEvent),
+
   getSettings: () => api.get('/api/settings'),
   putSettings: (s) => api.put('/api/settings', s),
   exportJson: () => api.get('/api/settings/export'),
-  createBackup: () => api.post('/api/settings/backup'),
-  backups: () => api.get('/api/settings/backups'),
-  diagnostics: () => api.get('/api/settings/diagnostics'),
-  logs: (limit = 100, errors_only = false) => api.get('/api/settings/logs', { limit, errors_only }),
-  openLogFolder: () => api.post('/api/settings/logs/open-folder'),
 
   // app auth
   me:     () => api.get('/api/auth-app/me'),

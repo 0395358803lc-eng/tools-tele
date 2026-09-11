@@ -1,5 +1,6 @@
 @echo off
-title Multi TG Manager
+chcp 65001 >nul
+title Quản Lý Telegram Đa Tài Khoản
 setlocal EnableDelayedExpansion
 
 set "ROOT=%~dp0"
@@ -8,161 +9,122 @@ cd /d "!ROOT!"
 
 echo.
 echo ============================================
-echo   Multi TG Manager
+echo   Quản Lý Telegram Đa Tài Khoản
 echo   !ROOT!
 echo ============================================
 echo.
 
 where python >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] Python not found on PATH.
-  echo Install Python 3.10+ from https://python.org
+  echo [LỖI] Không tìm thấy Python trong PATH.
+  echo Cài Python 3.10+ từ https://python.org
   pause
   exit /b 1
 )
 
 set "VENV_PY=!ROOT!\backend\.venv\Scripts\python.exe"
 if not exist "!VENV_PY!" (
-  echo [setup] Creating Python venv...
+  echo [thiết lập] Đang tạo môi trường ảo Python...
   python -m venv "!ROOT!\backend\.venv"
 )
 
-set "LOCKFILE=!ROOT!\backend\requirements.lock"
-set "LOCKMARK=!ROOT!\backend\.venv\.requirements-lock.sha256"
-if not exist "!LOCKFILE!" (
-  echo [ERROR] backend\requirements.lock is missing.
-  pause
-  exit /b 1
-)
-for /f %%H in ('powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '!LOCKFILE!').Hash"') do set "LOCKHASH=%%H"
-set "OLDLOCKHASH="
-if exist "!LOCKMARK!" set /p OLDLOCKHASH=<"!LOCKMARK!"
-"!VENV_PY!" "!ROOT!\backend\check_requirements.py" >nul 2>nul
+echo [kiểm tra] Đang xác minh gói Python...
+"!VENV_PY!" -c "import fastapi, telethon, bcrypt, aiosqlite, alembic, cryptography" >nul 2>nul
 set "DEPS_OK=!errorlevel!"
-if /I not "!OLDLOCKHASH!"=="!LOCKHASH!" set "DEPS_OK=1"
+echo [kiểm tra] DEPS_OK=!DEPS_OK!
 
 if not "!DEPS_OK!"=="0" (
-  echo [setup] Installing Python packages... please wait 1-3 minutes
+  echo [thiết lập] Đang cài gói Python...
   "!VENV_PY!" -m pip install --upgrade pip
-  "!VENV_PY!" -m pip install -r "!LOCKFILE!"
+  "!VENV_PY!" -m pip install -r "!ROOT!\backend\requirements.txt"
   if errorlevel 1 (
-    echo [ERROR] pip install failed.
+    echo [LỖI] Cài đặt bằng pip thất bại.
     pause
     exit /b 1
   )
-  >"!LOCKMARK!" echo !LOCKHASH!
-)
-"!VENV_PY!" -m pip check >nul
-if errorlevel 1 (
-  echo [ERROR] Installed Python packages have incompatible dependencies.
-  pause
-  exit /b 1
 )
 
 set "ENVFILE=!ROOT!\backend\.env"
 set "ENVEXAMPLE=!ROOT!\backend\.env.example"
-echo [check] Looking for env at: !ENVFILE!
+echo [kiểm tra] Đang tìm tệp env tại: !ENVFILE!
 
 if not exist "!ENVFILE!" (
-  echo [setup] Creating backend\.env from .env.example...
+  echo [thiết lập] Đang tạo backend\.env từ .env.example...
   if not exist "!ENVEXAMPLE!" (
-    echo [ERROR] backend\.env.example is missing.
+    echo [LỖI] Thiếu backend\.env.example.
     pause
     exit /b 1
   )
   copy /Y "!ENVEXAMPLE!" "!ENVFILE!" >nul
-  "!VENV_PY!" -c "import secrets,re,pathlib,os; p=pathlib.Path(os.environ['ENVFILE']); t=p.read_text(encoding='utf-8'); t=re.sub(r'SESSION_SECRET=.*', 'SESSION_SECRET='+secrets.token_urlsafe(48), t, count=1); p.write_text(t, encoding='utf-8')"
+  "!VENV_PY!" -c "import re,pathlib,os; from cryptography.fernet import Fernet; p=pathlib.Path(os.environ['ENVFILE']); t=p.read_text(encoding='utf-8'); t=re.sub(r'SECRETS_ENCRYPTION_KEY=.*', 'SECRETS_ENCRYPTION_KEY='+Fernet.generate_key().decode(), t, count=1); p.write_text(t, encoding='utf-8')"
   echo.
   echo ============================================
-  echo   FIRST RUN - please fill backend\.env
+  echo   LẦN CHẠY ĐẦU - hãy điền backend\.env
   echo ============================================
   echo   - TG_API_ID    ^(from https://my.telegram.org^)
   echo   - TG_API_HASH  ^(from https://my.telegram.org^)
   echo   - APP_PASSWORD ^(your login password^)
   echo.
-  echo   Save Notepad, close it, then re-run start.bat
+  echo   Lưu Notepad, đóng lại rồi chạy start.bat lần nữa
   echo ============================================
   start "" notepad "!ENVFILE!"
   pause
   exit /b 0
 ) else (
-  echo [check] backend\.env found.
+  echo [kiểm tra] Đã tìm thấy backend\.env.
 )
 
-rem ---- pre-flight: fail fast on missing/invalid Telegram API credentials ----
-set "ENVCHECK="
-for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -File "!ROOT!\backend\check_env.ps1" -EnvPath "!ENVFILE!"`) do set "ENVCHECK=%%A"
-
-if not "!ENVCHECK!"=="OK" (
-  echo.
-  echo ============================================
-  echo   INVALID BACKEND CONFIGURATION
-  echo.
-  if "!ENVCHECK!"=="BADHASH" (
-    echo   TG_API_ID is set but TG_API_HASH is empty.
-  ) else if "!ENVCHECK!"=="BADPASSWORD" (
-    echo   APP_PASSWORD must be 12-256 characters and cannot be the example value.
-  ) else if "!ENVCHECK!"=="BADSECRET" (
-    echo   SESSION_SECRET must be 48-1024 characters.
-  ) else (
-    echo   TG_API_ID is empty or not a valid positive integer.
-  )
-  echo.
-  echo   Get your own from https://my.telegram.org
-  echo   Then fill TG_API_ID and TG_API_HASH in
-  echo   backend\.env and run start.bat again.
-  echo ============================================
-  start "" notepad "!ENVFILE!"
-  pause
-  exit /b 1
-)
-
-rem ---- single instance / clear port conflict handling ----
-powershell -NoProfile -Command "try { $h=Invoke-RestMethod -TimeoutSec 2 http://127.0.0.1:8000/api/health; if ($h.backend -eq 'ok') { exit 0 } } catch {}; exit 1" >nul 2>nul
-if not errorlevel 1 (
-  echo [info] Multi TG Manager is already running. Opening it now...
-  start "" http://127.0.0.1:8000
-  exit /b 0
-)
-netstat -ano | findstr /R /C:"127.0.0.1:8000 .*LISTENING" >nul
-if not errorlevel 1 (
-  echo [ERROR] Port 8000 is already in use by another application.
-  echo Close that application or free port 8000, then run START.bat again.
-  pause
-  exit /b 1
-)
-
-pushd "!ROOT!\backend"
-"!VENV_PY!" -c "from app.config import settings; settings.ensure_data_directories(); p=settings.database_path.parent/'write.test'; p.write_text('ok'); p.unlink()" >nul 2>nul
-set "DATA_OK=!errorlevel!"
-popd
-if not "!DATA_OK!"=="0" (
-  echo [ERROR] The data folder is not writable: !ROOT!\data
-  pause
-  exit /b 1
-)
-
-rem Release mode: START only serves the bundled frontend and never needs Node.js.
 if not exist "!ROOT!\backend\static\index.html" (
-  echo [ERROR] Built frontend is missing. Run BUILD_RELEASE.bat from a development checkout.
-  pause
-  exit /b 1
+  where node >nul 2>nul
+  if errorlevel 1 (
+    echo [LỖI] Không tìm thấy Node.js trong PATH. Cài Node 18+ từ https://nodejs.org
+    pause
+    exit /b 1
+  )
+  if not exist "!ROOT!\frontend\node_modules" (
+    echo [thiết lập] Đang cài các gói frontend...
+    pushd "!ROOT!\frontend"
+    call npm install
+    if errorlevel 1 (
+      popd
+      echo [LỖI] npm install thất bại.
+      pause
+      exit /b 1
+    )
+    popd
+  )
+  echo [build] Đang build frontend...
+  pushd "!ROOT!\frontend"
+  call npm run build
+  if errorlevel 1 (
+    popd
+    echo [LỖI] Build frontend thất bại.
+    pause
+    exit /b 1
+  )
+  popd
 )
 
 echo.
 echo ============================================
-echo   Server: http://localhost:8000
-echo   Close this window to stop.
+echo   Máy chủ: http://localhost:8000
+echo   Đóng cửa sổ này để dừng máy chủ.
 echo ============================================
 echo.
 
 start "" cmd /c "timeout /t 4 /nobreak >nul & start http://localhost:8000"
 
 cd /d "!ROOT!\backend"
-set PYTHONUNBUFFERED=1
-"!VENV_PY!" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
+echo [cơ sở dữ liệu] Đang áp dụng migration...
+"!VENV_PY!" -m alembic upgrade head
+if errorlevel 1 (
+  echo [LỖI] Migration cơ sở dữ liệu thất bại.
+  pause
+  exit /b 1
+)
+"!VENV_PY!" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 echo.
-echo Server stopped.
+echo Máy chủ đã dừng.
 pause
 endlocal

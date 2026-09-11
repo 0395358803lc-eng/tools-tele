@@ -2,17 +2,10 @@
 import asyncio
 import json
 import random
-import re
-from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 from telethon.errors import FloodWaitError
 from .config import settings
-from .errors import error_code_of, error_params_of
-
-
-class _NotConnected(Exception):
-    """Internal sentinel: the account's client vanished (disconnected/replaced)
-    between task scheduling and execution under the action lock."""
+from .telegram_errors import classify_error
 
 
 async def jitter_delay(min_s: float | None = None, max_s: float | None = None):
@@ -23,85 +16,108 @@ async def jitter_delay(min_s: float | None = None, max_s: float | None = None):
     await asyncio.sleep(random.uniform(lo, hi))
 
 
+async def read_upload_limited(upload, max_bytes: int, chunk_size: int = 1024 * 1024) -> bytes:
+    """Read an UploadFile without allowing unbounded memory growth."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(f"Tệp tải lên vượt giới hạn {max_bytes // (1024 * 1024)} MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 # Map Telethon exception class names -> short, human-friendly explanations.
 # Matched by class name so we don't need to import every error type.
 _ERROR_MESSAGES = {
-    "ChannelsTooMuchError": "This account is in too many groups/channels (Telegram cap ~500). Leave some first.",
-    "UserChannelsTooMuchError": "This account is in too many groups/channels. Leave some first.",
-    "ChannelPrivateError": "Channel/group is private, or this account was removed/banned from it.",
-    "InviteHashExpiredError": "Invite link has expired.",
-    "InviteHashInvalidError": "Invite link is invalid.",
-    "InviteHashEmptyError": "Invite link is empty/invalid.",
-    "UsernameNotOccupiedError": "No such username — nobody is using it.",
-    "UsernameInvalidError": "Invalid username (5–32 chars, letters/digits/underscore, must start with a letter).",
-    "UsernameOccupiedError": "That username is already taken.",
-    "UsernamePurchaseAvailableError": "That username is reserved/for sale — pick another.",
-    "ReactionInvalidError": "This chat doesn't allow that reaction.",
-    "ReactionEmptyError": "No reaction was sent.",
-    "ReactionsTooManyError": "Too many reactions — this chat allows fewer.",
-    "ChatWriteForbiddenError": "No permission to do this here.",
-    "ChatAdminRequiredError": "Admin rights are required for this action.",
-    "ChatGuestSendForbiddenError": "You must join the chat before you can do this.",
-    "ChatRestrictedError": "This chat is restricted for this account.",
-    "ChatForbiddenError": "This account can't access this chat.",
-    "MsgIdInvalidError": "Post not found (bad message id / link).",
-    "MessageIdInvalidError": "Post not found (bad message id / link).",
-    "PeerIdInvalidError": "Can't access this chat from this account.",
-    "UserDeactivatedBanError": "This account is banned/deactivated by Telegram.",
-    "UserDeactivatedError": "This account is deactivated.",
-    "AuthKeyUnregisteredError": "Session expired — reconnect this account.",
-    "UserBannedInChannelError": "This account is banned from sending here.",
-    "UserAlreadyParticipantError": "Already a member.",
-    "InviteRequestSentError": "Join request sent — waiting for an admin to approve.",
-    "UserAlreadyInvitedError": "Join request already sent — waiting for approval.",
-    "UsersTooMuchError": "This group/channel is full.",
-    "PasswordHashInvalidError": "Wrong current 2FA password.",
-    "FreshResetAuthorisationForbiddenError": "Telegram is blocking 2FA changes on a freshly-added session — try again later.",
-    "PasswordTooFreshError": "2FA was changed too recently — Telegram requires a wait before changing it again.",
-    "SessionTooFreshError": "This session is too new — Telegram requires a wait before changing 2FA.",
-    "DocumentInvalidError": "That custom emoji isn't valid for this chat.",
+    "ChannelsTooMuchError": "Tài khoản này đã tham gia quá nhiều nhóm/kênh (giới hạn Telegram khoảng 500). Hãy rời bớt trước.",
+    "UserChannelsTooMuchError": "Tài khoản này đã tham gia quá nhiều nhóm/kênh. Hãy rời bớt trước.",
+    "ChannelPrivateError": "Kênh/nhóm ở chế độ riêng tư, hoặc tài khoản này đã bị xóa/cấm khỏi đó.",
+    "InviteHashExpiredError": "Liên kết mời đã hết hạn.",
+    "InviteHashInvalidError": "Liên kết mời không hợp lệ.",
+    "InviteHashEmptyError": "Liên kết mời trống hoặc không hợp lệ.",
+    "UsernameNotOccupiedError": "Không tồn tại tên người dùng này — hiện chưa có ai sử dụng.",
+    "UsernameInvalidError": "Tên người dùng không hợp lệ (5–32 ký tự, gồm chữ/số/gạch dưới và phải bắt đầu bằng chữ cái).",
+    "UsernameOccupiedError": "Tên người dùng này đã được sử dụng.",
+    "UsernamePurchaseAvailableError": "Tên người dùng này đang được giữ/rao bán — hãy chọn tên khác.",
+    "ReactionInvalidError": "Cuộc trò chuyện này không cho phép cảm xúc đó.",
+    "ReactionEmptyError": "Không có cảm xúc nào được gửi.",
+    "ReactionsTooManyError": "Quá nhiều cảm xúc — cuộc trò chuyện này cho phép ít hơn.",
+    "ChatWriteForbiddenError": "Bạn không có quyền thực hiện thao tác này tại đây.",
+    "ChatAdminRequiredError": "Thao tác này yêu cầu quyền quản trị viên.",
+    "ChatGuestSendForbiddenError": "Bạn phải tham gia cuộc trò chuyện trước khi thực hiện thao tác này.",
+    "ChatRestrictedError": "Cuộc trò chuyện này bị hạn chế đối với tài khoản này.",
+    "ChatForbiddenError": "Tài khoản này không thể truy cập cuộc trò chuyện.",
+    "MsgIdInvalidError": "Không tìm thấy bài viết (ID tin nhắn/liên kết không hợp lệ).",
+    "MessageIdInvalidError": "Không tìm thấy bài viết (ID tin nhắn/liên kết không hợp lệ).",
+    "PeerIdInvalidError": "Tài khoản này không thể truy cập cuộc trò chuyện.",
+    "UserDeactivatedBanError": "Tài khoản này đã bị Telegram cấm/vô hiệu hóa.",
+    "UserDeactivatedError": "Tài khoản này đã bị vô hiệu hóa.",
+    "AuthKeyUnregisteredError": "Phiên đã hết hiệu lực — hãy kết nối lại tài khoản.",
+    "UserBannedInChannelError": "Tài khoản này bị cấm gửi nội dung tại đây.",
+    "UserAlreadyParticipantError": "Đã là thành viên.",
+    "InviteRequestSentError": "Đã gửi yêu cầu tham gia — đang chờ quản trị viên phê duyệt.",
+    "UserAlreadyInvitedError": "Yêu cầu tham gia đã được gửi — đang chờ phê duyệt.",
+    "UsersTooMuchError": "Nhóm/kênh này đã đầy.",
+    "PasswordHashInvalidError": "Mật khẩu 2FA hiện tại không đúng.",
+    "FreshResetAuthorisationForbiddenError": "Telegram đang chặn thay đổi 2FA trên phiên vừa thêm — hãy thử lại sau.",
+    "PasswordTooFreshError": "2FA vừa được thay đổi gần đây — Telegram yêu cầu chờ trước khi đổi lại.",
+    "SessionTooFreshError": "Phiên này còn quá mới — Telegram yêu cầu chờ trước khi thay đổi 2FA.",
+    "DocumentInvalidError": "Emoji tùy chỉnh này không hợp lệ cho cuộc trò chuyện.",
 }
 
 
-def _redact(text: str) -> str:
-    """Strip value-like secrets out of arbitrary error text before it can reach
-    a log line or the UI. Catches long digit runs (OTP codes), hex tokens and
-    api_hash= style parameters."""
-    if not text:
-        return text
-    t = text
-    # api_id/api_hash/hash=tokens (32+ hex)
-    t = re.sub(r"(?i)(api_hash|api_id|hash)=\b[0-9a-f]{8,}\b", r"\1=[REDACTED]", t)
-    # bare 32+ hex tokens (access hashes, session ids)
-    t = re.sub(r"\b[0-9a-f]{32,}\b", "[REDACTED]", t)
-    # Phone numbers retain only their final four digits; OTPs never survive.
-    t = re.sub(r"(?<!\d)\d{4,8}(?!\d)", "[REDACTED]", t)
-    t = re.sub(r"(?<!\d)\+?\d{9,15}(?!\d)", lambda m: "***" + m.group(0)[-4:], t)
-    return t
+def public_error_message(error_type: str | None) -> str | None:
+    """Map a persisted exception type to a browser-safe message without raw detail."""
+    if not error_type:
+        return None
+    if error_type == "FloodWaitError":
+        return "Telegram đang giới hạn tốc độ; hãy chờ hết thời gian đếm ngược rồi thử lại."
+    if error_type in _ERROR_MESSAGES:
+        return _ERROR_MESSAGES[error_type]
+    if error_type in {
+        "TimeoutError", "ConnectionError", "ConnectionResetError",
+        "ConnectionAbortedError", "ConnectionRefusedError", "OSError",
+    }:
+        return "Lỗi mạng tạm thời — có thể thử lại tài khoản."
+    if error_type in {
+        "AuthKeyUnregisteredError", "AuthKeyDuplicatedError", "SessionRevokedError",
+        "SessionExpiredError", "SessionPasswordNeededError",
+    }:
+        return "Phiên Telegram không còn được xác thực — hãy kết nối lại tài khoản."
+    return f"{error_type}: thao tác thất bại. Hãy kiểm tra nhật ký máy chủ để biết chi tiết."
 
 
 def friendly_error(e: Exception) -> str:
     if isinstance(e, FloodWaitError):
-        return f"Rate limited — wait {e.seconds}s before trying again."
+        return f"Bị giới hạn tốc độ — hãy chờ {e.seconds} giây trước khi thử lại."
     name = type(e).__name__
     if name in _ERROR_MESSAGES:
         return _ERROR_MESSAGES[name]
-    # Some Telethon errors are dynamically named like 'FloodWaitError' subclasses.
-    return f"Telegram operation failed ({name})"
+    info = classify_error(e)
+    if info.category == "network":
+        return "Lỗi mạng tạm thời — có thể thử lại tài khoản."
+    if info.category == "authentication":
+        return "Phiên Telegram không còn được xác thực — hãy kết nối lại tài khoản."
+    return f"{name}: thao tác thất bại. Hãy kiểm tra nhật ký máy chủ để biết chi tiết."
 
 
 # Errors that aren't real failures — they're expected conditions where the
 # action simply can't apply (account full, chat disallows the reaction, group
 # full). We surface these as a soft "skipped" with a plain reason instead of a
 # scary red "failed", so a bulk run still finishes cleanly.
-# NOTE: ChannelsTooMuchError is deliberately NOT here — since auto-leave was
-# removed, hitting the ~500 chat cap is a real failure the user must act on.
 SOFT_SKIP_ERRORS = {
+    "ChannelsTooMuchError",     # account is in too many groups/channels (~500 cap)
+    "UserChannelsTooMuchError", # same, alternate name
     "ReactionInvalidError",     # this chat doesn't allow that reaction
     "ReactionEmptyError",       # reaction not accepted
     "ReactionsTooManyError",    # chat allows fewer reactions
     "UsersTooMuchError",        # group/channel is full
-    "UserAlreadyParticipantError",  # already a member — nothing to do
+    "UserAlreadyParticipantError",  # đã là thành viên — nothing to do
     "DocumentInvalidError",     # custom emoji not allowed here
 }
 
@@ -110,132 +126,148 @@ def is_soft_error(e: Exception) -> bool:
     return type(e).__name__ in SOFT_SKIP_ERRORS
 
 
-@dataclass
-class BulkResult:
-    """Structured result for one account in a bulk run.
+class BulkPacer:
+    """Serialize action start times while still allowing bounded in-flight work."""
 
-    `message_code` is a full i18n key (frontend translates it), `params` are its
-    interpolation values, and `detail` is a debug/fallback string only — it is
-    never the primary text the UI shows for this row."""
-    status: str  # ok | failed | skipped | pending
-    message_code: Optional[str] = None
-    params: Optional[dict] = field(default_factory=dict)
-    detail: Optional[str] = None
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._next_start = 0.0
 
-
-def ok_result(message_code=None, params=None, detail=None):
-    return BulkResult("ok", message_code, params, detail)
-
-
-def skipped_result(message_code=None, params=None, detail=None):
-    return BulkResult("skipped", message_code, params, detail)
-
-
-def failed_result(message_code=None, params=None, detail=None):
-    return BulkResult("failed", message_code, params, detail)
-
-
-def pending_result(message_code=None, params=None, detail=None):
-    return BulkResult("pending", message_code, params, detail)
-
-
-def _row_from_result(aid: int, phone: str, name: str, res: BulkResult | tuple) -> dict:
-    if isinstance(res, BulkResult):
-        row: dict = {"id": aid, "phone": phone, "name": name,
-                     "status": res.status, "detail": res.detail}
-        if res.message_code:
-            row["message_code"] = res.message_code
-            if res.params:
-                row["params"] = res.params
-        return row
-    # backward-compat (status, detail) tuple — treated as an ok row with detail
-    status, detail = res
-    return {"id": aid, "phone": phone, "name": name,
-            "status": "ok" if status in ("pending", "skipped") else status,
-            "detail": detail or None}
+    async def wait_turn(self):
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            if self._next_start > now:
+                await asyncio.sleep(self._next_start - now)
+            lo = max(0.0, float(getattr(settings, "RATE_MIN", 0.7)))
+            hi = max(lo, float(getattr(settings, "RATE_MAX", 1.5)))
+            self._next_start = loop.time() + random.uniform(lo, hi)
 
 
 async def bulk_stream(
     accounts: list[tuple[int, str, str]],
-    action: Callable[[object, int], Awaitable[BulkResult | tuple[str, str]]],
+    action: Callable[[object, int], Awaitable[tuple[str, str]]],
     on_success: Optional[Callable[[int], None]] = None,
     concurrency: int | None = None,
+    job_type: str = "bulk_action",
+    job_parameters: dict | None = None,
 ):
-    """Run `action` over accounts with bounded concurrency, yielding NDJSON lines.
+    """Run a persisted bulk action with pacing, FloodWait protection and progress."""
+    from .tg_manager import manager
+    from . import job_store
 
-    accounts: list of (account_id, phone, display_name).
-    action(client, account_id) -> BulkResult (preferred) or (status, detail) tuple.
-        Raise for failures (mapped via friendly_error). Expected/non-fatal errors
-        (see SOFT_SKIP_ERRORS) become a soft 'skipped' instead of 'failed'.
-        Accounts that aren't connected are skipped automatically.
-    on_success(account_id): optional side-effect after a non-failing action.
-    concurrency: how many accounts run at once (defaults to settings.CONCURRENCY).
-
-    Emits one `{"type":"progress", ...}` line as each account finishes and a final
-    `{"type":"done", ...}` line. Rows carry `message_code`+`params` (structured
-    outcome) or `error_code`+`error_params` (raised exception); `detail` is always
-    kept as a debug fallback. Telegram rate limits are per-account, so running
-    different accounts in parallel is safe; each account still does a single paced
-    action with a jitter delay from the Settings window.
-    """
-    from .tg_manager import manager  # lazy import to avoid circular import
+    # Duplicate account ids are ignored so SQL job-item uniqueness is stable.
+    seen: set[int] = set()
+    unique_accounts: list[tuple[int, str, str]] = []
+    for row in accounts:
+        if row[0] not in seen:
+            seen.add(row[0])
+            unique_accounts.append(row)
+    accounts = unique_accounts
 
     total = len(accounts)
-    conc = concurrency if concurrency is not None else getattr(settings, "CONCURRENCY", 5)
+    conc = concurrency if concurrency is not None else getattr(settings, "CONCURRENCY", 8)
     try:
-        conc = max(1, int(conc))
+        conc = max(1, min(50, int(conc)))
     except (TypeError, ValueError):
-        conc = 5
+        conc = 8
 
+    job_id = await job_store.create_job(job_type, accounts, job_parameters)
     success = failed = skipped = pending = 0
     results: list[dict] = []
     sem = asyncio.Semaphore(conc)
+    pacer = BulkPacer()
     out_q: asyncio.Queue = asyncio.Queue()
 
-    async def worker(aid: int, phone: str, name: str):
-        async with sem:
-            # The client is resolved lazily, *inside* the per-account action
-            # lock, so a reconnect that swaps the client between here and the
-            # lock acquisition can never hand the action a stale/disconnected
-            # reference racing a connect().
-            if not manager.get(aid):
-                row = {"id": aid, "phone": phone, "name": name,
-                       "status": "skipped", "detail": "not connected",
-                       "error_code": "ACCOUNT_NOT_CONNECTED"}
-            else:
-                try:
-                    operation = getattr(action, "__name__", "bulk_mutation")
-                    if operation.startswith("<"):
-                        operation = "bulk_mutation"
-
-                    async def _invoke():
-                        cli = manager.get(aid)
-                        if not cli:
-                            raise _NotConnected()
-                        return await action(cli, aid)
-
-                    res = await manager.run_account_action(aid, _invoke, operation=operation)
-                    status = res.status if isinstance(res, BulkResult) else res[0]
-                    row = _row_from_result(aid, phone, name, res)
-                    if on_success and status in ("ok", "pending"):
-                        on_success(aid)
-                except _NotConnected:
-                    row = {"id": aid, "phone": phone, "name": name,
-                           "status": "skipped", "detail": "not connected",
-                           "error_code": "ACCOUNT_NOT_CONNECTED"}
-                except Exception as e:
-                    soft = is_soft_error(e)
-                    detail = friendly_error(e)
-                    row = {"id": aid, "phone": phone, "name": name,
-                           "status": "skipped" if soft else "failed",
-                           "detail": detail}
-                    code = error_code_of(e)
-                    if code:
-                        row["error_code"] = code
-                        params = error_params_of(e)
-                        if params:
-                            row["error_params"] = params
+    async def finish_row(row: dict):
+        await job_store.mark_item_result(
+            job_id,
+            row["id"],
+            row["status"],
+            row.get("detail", ""),
+            row.get("error_code"),
+        )
         await out_q.put(row)
+
+    async def worker(aid: int, phone: str, name: str):
+        if await job_store.is_cancelled(job_id):
+            await finish_row({
+                "id": aid, "phone": phone, "name": name,
+                "status": "skipped", "detail": "đã hủy trước khi bắt đầu",
+                "error_code": "cancelled",
+            })
+            return
+
+        cli = manager.get(aid)
+        if not cli:
+            await finish_row({
+                "id": aid, "phone": phone, "name": name,
+                "status": "skipped", "detail": "chưa kết nối",
+                "error_code": "not_connected",
+            })
+            return
+
+        remaining = await manager.flood_wait_remaining(aid)
+        if remaining > 0:
+            await finish_row({
+                "id": aid, "phone": phone, "name": name,
+                "status": "pending",
+                "detail": f"Đang bị giới hạn tốc độ — thử lại sau khoảng {remaining} giây.",
+                "error_code": "FloodWaitError",
+            })
+            return
+
+        await pacer.wait_turn()
+        if await job_store.is_cancelled(job_id):
+            await finish_row({
+                "id": aid, "phone": phone, "name": name,
+                "status": "skipped", "detail": "đã hủy trước khi thực hiện thao tác",
+                "error_code": "cancelled",
+            })
+            return
+
+        async with sem:
+            await job_store.mark_item_started(job_id, aid)
+            try:
+                timeout_s = max(0.1, float(getattr(settings, "TG_RPC_TIMEOUT_SECONDS", 45.0)))
+                status, detail = await asyncio.wait_for(action(cli, aid), timeout=timeout_s)
+                if status not in ("pending", "skipped"):
+                    status = "ok"
+                if status in ("ok", "pending"):
+                    if on_success:
+                        on_success(aid)
+                    if status == "ok":
+                        await manager.mark_operation_success(aid)
+                row = {
+                    "id": aid, "phone": phone, "name": name,
+                    "status": status, "detail": detail,
+                }
+            except asyncio.TimeoutError as exc:
+                await manager.mark_operation_error(aid, exc)
+                row = {
+                    "id": aid, "phone": phone, "name": name,
+                    "status": "failed",
+                    "detail": f"Thao tác Telegram hết thời gian chờ sau {timeout_s:.0f} giây.",
+                    "error_code": "TimeoutError",
+                }
+            except FloodWaitError as exc:
+                await manager.mark_flood_wait(aid, exc.seconds)
+                row = {
+                    "id": aid, "phone": phone, "name": name,
+                    "status": "pending",
+                    "detail": friendly_error(exc),
+                    "error_code": type(exc).__name__,
+                }
+            except Exception as exc:
+                await manager.mark_operation_error(aid, exc)
+                soft = is_soft_error(exc)
+                row = {
+                    "id": aid, "phone": phone, "name": name,
+                    "status": "skipped" if soft else "failed",
+                    "detail": friendly_error(exc),
+                    "error_code": type(exc).__name__,
+                }
+        await finish_row(row)
 
     tasks = [asyncio.create_task(worker(aid, phone, name)) for aid, phone, name in accounts]
 
@@ -252,23 +284,42 @@ async def bulk_stream(
             else:
                 failed += 1
             results.append(row)
-            line: dict = {
-                "type": "progress", "current": done_count, "total": total,
+            await job_store.update_counts(
+                job_id,
+                success=success,
+                failed=failed,
+                skipped=skipped,
+                pending=pending,
+            )
+            yield json.dumps({
+                "type": "progress", "job_id": job_id,
+                "current": done_count, "total": total,
                 "account_name": row.get("name", ""), "status": status,
                 "detail": row.get("detail", ""),
-                "success": success, "failed": failed, "skipped": skipped, "pending": pending,
-            }
-            for code_field, param_field in (("message_code", "params"), ("error_code", "error_params")):
-                if row.get(code_field):
-                    line[code_field] = row[code_field]
-                    if row.get(param_field):
-                        line[param_field] = row[param_field]
-            yield json.dumps(line) + "\n"
+                "success": success, "failed": failed,
+                "skipped": skipped, "pending": pending,
+            }) + "\n"
+    except BaseException:
+        await job_store.request_cancel(job_id)
+        raise
     finally:
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    cancelled = await job_store.is_cancelled(job_id)
+    final_status = "cancelled" if cancelled else ("completed_with_errors" if failed else "completed")
+    await job_store.finish_job(
+        job_id,
+        final_status,
+        success=success,
+        failed=failed,
+        skipped=skipped,
+        pending=pending,
+    )
+
     yield json.dumps({
-        "type": "done", "total": total,
-        "success": success, "failed": failed, "skipped": skipped, "pending": pending,
+        "type": "done", "job_id": job_id, "status": final_status,
+        "total": total,
+        "success": success, "failed": failed,
+        "skipped": skipped, "pending": pending,
         "results": results,
     }) + "\n"
