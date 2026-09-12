@@ -26,7 +26,36 @@ def normalize_async_url(raw: str) -> str:
         return 'postgresql+asyncpg://' + raw[len('postgres://'):]
     if raw.startswith('postgresql://'):
         return 'postgresql+asyncpg://' + raw[len('postgresql://'):]
+    if raw.startswith('sqlite+aiosqlite:///'):
+        tail = raw[len('sqlite+aiosqlite:///'):]
+        if tail and not tail.startswith('/'):
+            return 'sqlite+aiosqlite:///' + str((ROOT / 'backend' / tail).resolve())
     return raw
+
+async def database_has_telegram_api(raw_url: str, encryption_key: str) -> bool:
+    if not raw_url or not encryption_key:
+        return False
+    try:
+        cipher = Fernet(encryption_key.encode('ascii'))
+    except Exception:
+        return False
+    engine=create_async_engine(normalize_async_url(raw_url), pool_pre_ping=True)
+    try:
+        async with engine.connect() as conn:
+            rows=(await conn.execute(text("select key, ciphertext from encrypted_secrets where key in ('telegram:api_id','telegram:api_hash')"))).all()
+        values={}
+        for name, token in rows:
+            try:
+                values[str(name)] = cipher.decrypt(str(token).encode('ascii')).decode('utf-8').strip()
+            except Exception:
+                return False
+        api_id=values.get('telegram:api_id','')
+        api_hash=values.get('telegram:api_hash','')
+        return api_id.isdigit() and int(api_id) > 0 and bool(api_hash)
+    except Exception:
+        return False
+    finally:
+        await engine.dispose()
 
 def expected_head() -> str | None:
     cfg=Config(str(ROOT/'backend'/'alembic.ini'))
@@ -63,12 +92,21 @@ def main():
     pw=v.get('APP_PASSWORD','')
     if len(pw)>=12 and 'change-me' not in pw: ok.append('Đã cấu hình APP_PASSWORD')
     else: blockers.append('APP_PASSWORD phải được cấu hình bằng giá trị mạnh (từ 12 ký tự)')
-    if str(v.get('TG_API_ID','')).strip() not in {'','0'} and v.get('TG_API_HASH','').strip(): ok.append('Đã cấu hình thông tin Telegram API')
-    else: blockers.append('Chưa cấu hình TG_API_ID/TG_API_HASH')
     key=v.get('SECRETS_ENCRYPTION_KEY','').strip()
+    key_valid = False
     try:
-        Fernet(key.encode('ascii')); ok.append('SECRETS_ENCRYPTION_KEY là Fernet key hợp lệ')
+        Fernet(key.encode('ascii')); key_valid = True; ok.append('SECRETS_ENCRYPTION_KEY là Fernet key hợp lệ')
     except Exception: blockers.append('Thiếu SECRETS_ENCRYPTION_KEY hoặc key không hợp lệ')
+    env_tg = str(v.get('TG_API_ID','')).strip() not in {'','0'} and bool(v.get('TG_API_HASH','').strip())
+    db_tg = False
+    if not env_tg and key_valid and db:
+        db_tg = asyncio.run(database_has_telegram_api(db, key))
+    if env_tg:
+        ok.append('Đã cấu hình thông tin Telegram API từ environment')
+    elif db_tg:
+        ok.append('Đã cấu hình thông tin Telegram API trong encrypted SQL secret store')
+    else:
+        blockers.append('Chưa cấu hình Telegram API trong environment hoặc encrypted SQL secret store')
     if truthy(v.get('COOKIE_SECURE')):
         ok.append('Đã bật cookie bảo mật')
     elif args.strict:
