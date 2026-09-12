@@ -97,7 +97,8 @@ async def join_one(account_id: int, body: JoinIn):
     if not cli:
         raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
-        status, detail = await _join_handle(cli, body.target)
+        async with manager.account_operation(account_id, "group_join"):
+            status, detail = await _join_handle(cli, body.target)
         _cache.pop(account_id, None)
         await log_audit("group:join", account_id, {"target": body.target, "status": status})
     except FloodWaitError as e:
@@ -164,11 +165,12 @@ async def leave_one(account_id: int, body: LeaveIn):
     if not cli:
         raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
-        entity = await cli.get_entity(body.chat_id)
-        if isinstance(entity, (Channel, ChannelForbidden)):
-            await cli(LeaveChannelRequest(entity))
-        else:
-            await cli.delete_dialog(entity)
+        async with manager.account_operation(account_id, "group_leave"):
+            entity = await cli.get_entity(body.chat_id)
+            if isinstance(entity, (Channel, ChannelForbidden)):
+                await cli(LeaveChannelRequest(entity))
+            else:
+                await cli.delete_dialog(entity)
         _cache.pop(account_id, None)
         await log_audit("group:leave", account_id, {"chat_id": body.chat_id})
     except Exception as e:

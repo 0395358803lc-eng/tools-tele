@@ -244,9 +244,10 @@ async def multi_target_message_stream(
 
             await _mark_started(item["item_id"])
             try:
-                async with sem:
-                    entity = await asyncio.wait_for(_resolve_entity(cli, item["target"]), timeout=timeout_s)
-                    await asyncio.wait_for(cli.send_message(entity, text), timeout=timeout_s)
+                async with manager.account_operation(aid, "message_multi_send"):
+                    async with sem:
+                        entity = await asyncio.wait_for(_resolve_entity(cli, item["target"]), timeout=timeout_s)
+                        await asyncio.wait_for(cli.send_message(entity, text), timeout=timeout_s)
                 await manager.mark_operation_success(aid)
                 await finish(item, "ok", "đã gửi")
             except asyncio.TimeoutError as exc:

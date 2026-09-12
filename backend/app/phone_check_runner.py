@@ -6,7 +6,7 @@ import uuid
 from contextlib import suppress
 from datetime import timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 
 from .db import AsyncSessionLocal
 from .models import Account, BulkJob, PhoneCheckAccount, PhoneCheckItem
@@ -186,10 +186,11 @@ class PhoneCheckRunner:
             token = item.processing_token
             try:
                 timeout_s = max(5.0, min(120.0, float(params.get("rpc_timeout", 45.0))))
-                result = await asyncio.wait_for(
-                    check_phone(cli, item.normalized_phone or item.original_phone, item.id),
-                    timeout=timeout_s,
-                )
+                async with manager.account_operation(account_id, "phone_check"):
+                    result = await asyncio.wait_for(
+                        check_phone(cli, item.normalized_phone or item.original_phone, item.id),
+                        timeout=timeout_s,
+                    )
             except asyncio.CancelledError:
                 await self._quarantine_item(item.id, token)
                 raise
@@ -202,7 +203,6 @@ class PhoneCheckRunner:
                     await manager.mark_flood_wait(account_id, result.retry_after_seconds or 60)
                 await self._save_result(item.id, token, result)
 
-            await self._refresh_counts(job_id, account_id, runner_id)
             interval = max(0.1, min(60.0, float(params.get("min_request_interval", 1.2))))
             await asyncio.sleep(interval)
 
@@ -230,7 +230,6 @@ class PhoneCheckRunner:
             item.next_retry_at = None
             item.updated_at = now
             await db.commit()
-            await db.refresh(item)
             return item
 
     async def _quarantine_item(self, item_id: int, token: str | None) -> None:
@@ -248,6 +247,13 @@ class PhoneCheckRunner:
             await db.commit()
 
     async def _save_result(self, item_id: int, token: str | None, result) -> None:
+        """Persist one checker result and update progress counters atomically.
+
+        The previous implementation re-scanned/grouped the entire job after every
+        item, which made large jobs approach O(N^2). Counters are now updated in
+        the same SQL transaction as the item transition; finalization still uses
+        SQL as the source of truth for terminal-state checks.
+        """
         now = utcnow()
         async with AsyncSessionLocal() as db:
             item = await db.get(PhoneCheckItem, item_id)
@@ -280,6 +286,43 @@ class PhoneCheckRunner:
                 item.finished_at = now
             item.processing_token = None
             item.updated_at = now
+
+            terminal = item.status in TERMINAL_ITEM_STATUSES
+            if terminal and item.account_id is not None:
+                acc_values = {
+                    "processed": PhoneCheckAccount.processed + 1,
+                    "heartbeat_at": now,
+                    "updated_at": now,
+                }
+                if item.status == "found":
+                    acc_values["found"] = PhoneCheckAccount.found + 1
+                elif item.status == "not_discoverable":
+                    acc_values["not_discoverable"] = PhoneCheckAccount.not_discoverable + 1
+                elif item.status in {"invalid", "permanent_error"}:
+                    acc_values["errors"] = PhoneCheckAccount.errors + 1
+                await db.execute(
+                    update(PhoneCheckAccount)
+                    .where(
+                        PhoneCheckAccount.job_id == item.job_id,
+                        PhoneCheckAccount.account_id == item.account_id,
+                    )
+                    .values(**acc_values)
+                )
+
+            if terminal:
+                job_values = {
+                    "pending": case((BulkJob.pending > 0, BulkJob.pending - 1), else_=0),
+                    "heartbeat_at": now,
+                }
+                if item.status == "found":
+                    job_values["success"] = BulkJob.success + 1
+                elif item.status == "not_discoverable":
+                    job_values["skipped"] = BulkJob.skipped + 1
+                elif item.status == "permanent_error":
+                    job_values["failed"] = BulkJob.failed + 1
+                await db.execute(
+                    update(BulkJob).where(BulkJob.id == item.job_id).values(**job_values)
+                )
             await db.commit()
 
     async def _save_retry(self, item_id: int, token: str | None, status: str, code: str, detail: str) -> None:
@@ -314,38 +357,6 @@ class PhoneCheckRunner:
                 row.status = status
                 row.heartbeat_at = utcnow()
                 await db.commit()
-
-    async def _refresh_counts(self, job_id: str, account_id: int, runner_id: str) -> None:
-        async with AsyncSessionLocal() as db:
-            rows = (await db.execute(
-                select(PhoneCheckItem.status, func.count(PhoneCheckItem.id))
-                .where(PhoneCheckItem.job_id == job_id, PhoneCheckItem.account_id == account_id)
-                .group_by(PhoneCheckItem.status)
-            )).all()
-            counts = {status: int(count) for status, count in rows}
-            acc_row = (await db.execute(select(PhoneCheckAccount).where(
-                PhoneCheckAccount.job_id == job_id, PhoneCheckAccount.account_id == account_id
-            ))).scalar_one_or_none()
-            if acc_row:
-                acc_row.processed = sum(counts.get(s, 0) for s in TERMINAL_ITEM_STATUSES)
-                acc_row.found = counts.get("found", 0)
-                acc_row.not_discoverable = counts.get("not_discoverable", 0)
-                acc_row.errors = counts.get("invalid", 0) + counts.get("permanent_error", 0)
-                acc_row.heartbeat_at = utcnow()
-            job = await db.get(BulkJob, job_id)
-            if job and job.runner_id == runner_id:
-                all_rows = (await db.execute(
-                    select(PhoneCheckItem.status, func.count(PhoneCheckItem.id))
-                    .where(PhoneCheckItem.job_id == job_id)
-                    .group_by(PhoneCheckItem.status)
-                )).all()
-                all_counts = {status: int(count) for status, count in all_rows}
-                job.success = all_counts.get("found", 0)
-                job.skipped = all_counts.get("not_discoverable", 0) + all_counts.get("invalid", 0)
-                job.failed = all_counts.get("permanent_error", 0)
-                job.pending = sum(count for status, count in all_counts.items() if status not in TERMINAL_ITEM_STATUSES)
-                job.heartbeat_at = utcnow()
-            await db.commit()
 
     async def _finalize_job(self, job_id: str, runner_id: str) -> None:
         now = utcnow()

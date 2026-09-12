@@ -81,7 +81,8 @@ async def send_message(account_id: int, body: SendMessageIn):
     if not cli:
         raise HTTPException(409, "Tài khoản chưa kết nối")
     try:
-        await cli.send_message(body.target, body.text)
+        async with manager.account_operation(account_id, "message_send"):
+            await cli.send_message(body.target, body.text)
         await log_audit("message:send", account_id, {"target": body.target})
     except Exception as e:
         raise HTTPException(400, friendly_error(e))
@@ -674,8 +675,9 @@ async def chat_send(account_id: int, body: ChatSendIn):
     if not text:
         raise HTTPException(400, "Tin nhắn đang trống")
     try:
-        entity = await cli.get_entity(_coerce_peer(body.peer))
-        sent = await cli.send_message(entity, text)
+        async with manager.account_operation(account_id, "message_chat_send"):
+            entity = await cli.get_entity(_coerce_peer(body.peer))
+            sent = await cli.send_message(entity, text)
         await log_audit("message:chat_send", account_id, {"peer": body.peer})
         return {"ok": True, "message": _msg_to_dict(sent)}
     except Exception as e:

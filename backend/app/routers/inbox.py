@@ -129,8 +129,9 @@ async def inbox_reply(account_id: int, body: ChatSendIn):
     if not text:
         raise HTTPException(400, "Tin nhắn đang trống")
     try:
-        entity = await _resolve_entity(cli, body.peer)
-        sent = await asyncio.wait_for(cli.send_message(entity, text), timeout=45)
+        async with manager.account_operation(account_id, "inbox_reply"):
+            entity = await _resolve_entity(cli, body.peer)
+            sent = await asyncio.wait_for(cli.send_message(entity, text), timeout=45)
         await manager.mark_operation_success(account_id)
         await log_audit("inbox:reply", account_id, {"peer": body.peer})
         return {"ok": True, "message": _msg_to_dict(sent)}

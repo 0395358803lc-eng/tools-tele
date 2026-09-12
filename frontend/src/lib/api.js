@@ -215,7 +215,7 @@ export const Endpoints = {
   importPhoneChecks: (file, phone_region = 'VN') => { const fd = new FormData(); fd.append('file', file); fd.append('phone_region', phone_region); return api.postForm('/api/phone-checks/import', fd) },
   createPhoneCheckJob: (payload) => api.post('/api/phone-checks/jobs', payload),
   phoneCheckJobs: (limit = 50) => api.get('/api/phone-checks/jobs', { limit }),
-  phoneCheckJob: (id, status, limit = 500, offset = 0) => api.get(`/api/phone-checks/jobs/${id}`, { status, limit, offset }),
+  phoneCheckJob: (id, params = {}) => api.get(`/api/phone-checks/jobs/${id}`, params),
   pausePhoneCheckJob: (id) => api.post(`/api/phone-checks/jobs/${id}/pause`),
   resumePhoneCheckJob: (id) => api.post(`/api/phone-checks/jobs/${id}/resume`),
   cancelPhoneCheckJob: (id) => api.post(`/api/phone-checks/jobs/${id}/cancel`),

@@ -226,47 +226,48 @@ async def bulk_stream(
             })
             return
 
-        async with sem:
-            await job_store.mark_item_started(job_id, aid)
-            try:
-                timeout_s = max(0.1, float(getattr(settings, "TG_RPC_TIMEOUT_SECONDS", 45.0)))
-                status, detail = await asyncio.wait_for(action(cli, aid), timeout=timeout_s)
-                if status not in ("pending", "skipped"):
-                    status = "ok"
-                if status in ("ok", "pending"):
-                    if on_success:
-                        on_success(aid)
-                    if status == "ok":
-                        await manager.mark_operation_success(aid)
-                row = {
-                    "id": aid, "phone": phone, "name": name,
-                    "status": status, "detail": detail,
-                }
-            except asyncio.TimeoutError as exc:
-                await manager.mark_operation_error(aid, exc)
-                row = {
-                    "id": aid, "phone": phone, "name": name,
-                    "status": "failed",
-                    "detail": f"Thao tác Telegram hết thời gian chờ sau {timeout_s:.0f} giây.",
-                    "error_code": "TimeoutError",
-                }
-            except FloodWaitError as exc:
-                await manager.mark_flood_wait(aid, exc.seconds)
-                row = {
-                    "id": aid, "phone": phone, "name": name,
-                    "status": "pending",
-                    "detail": friendly_error(exc),
-                    "error_code": type(exc).__name__,
-                }
-            except Exception as exc:
-                await manager.mark_operation_error(aid, exc)
-                soft = is_soft_error(exc)
-                row = {
-                    "id": aid, "phone": phone, "name": name,
-                    "status": "skipped" if soft else "failed",
-                    "detail": friendly_error(exc),
-                    "error_code": type(exc).__name__,
-                }
+        async with manager.account_operation(aid, job_type):
+            async with sem:
+                await job_store.mark_item_started(job_id, aid)
+                try:
+                    timeout_s = max(0.1, float(getattr(settings, "TG_RPC_TIMEOUT_SECONDS", 45.0)))
+                    status, detail = await asyncio.wait_for(action(cli, aid), timeout=timeout_s)
+                    if status not in ("pending", "skipped"):
+                        status = "ok"
+                    if status in ("ok", "pending"):
+                        if on_success:
+                            on_success(aid)
+                        if status == "ok":
+                            await manager.mark_operation_success(aid)
+                    row = {
+                        "id": aid, "phone": phone, "name": name,
+                        "status": status, "detail": detail,
+                    }
+                except asyncio.TimeoutError as exc:
+                    await manager.mark_operation_error(aid, exc)
+                    row = {
+                        "id": aid, "phone": phone, "name": name,
+                        "status": "failed",
+                        "detail": f"Thao tác Telegram hết thời gian chờ sau {timeout_s:.0f} giây.",
+                        "error_code": "TimeoutError",
+                    }
+                except FloodWaitError as exc:
+                    await manager.mark_flood_wait(aid, exc.seconds)
+                    row = {
+                        "id": aid, "phone": phone, "name": name,
+                        "status": "pending",
+                        "detail": friendly_error(exc),
+                        "error_code": type(exc).__name__,
+                    }
+                except Exception as exc:
+                    await manager.mark_operation_error(aid, exc)
+                    soft = is_soft_error(exc)
+                    row = {
+                        "id": aid, "phone": phone, "name": name,
+                        "status": "skipped" if soft else "failed",
+                        "detail": friendly_error(exc),
+                        "error_code": type(exc).__name__,
+                    }
         await finish_row(row)
 
     tasks = [asyncio.create_task(worker(aid, phone, name)) for aid, phone, name in accounts]

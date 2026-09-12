@@ -30,7 +30,7 @@ class MigrationTests(unittest.TestCase):
             db = sqlite3.connect(db_path)
             try:
                 revision = db.execute('select version_num from alembic_version').fetchone()[0]
-                self.assertEqual(revision, 'a4c9e2f17b63')
+                self.assertEqual(revision, 'b6d4f0a9c821')
                 for table, col in [
                     ('accounts', 'tg_user_id'),
                     ('gone_accounts', 'tg_user_id'),

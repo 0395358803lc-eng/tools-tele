@@ -10,12 +10,12 @@ from typing import Literal
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..audit import log_audit
 from ..db import get_db
-from ..models import Account, BulkJob, PhoneCheckAccount, PhoneCheckItem
+from ..models import Account, AccountProxy, BulkJob, PhoneCheckAccount, PhoneCheckItem
 from ..phone_checker import normalize_phone_list
 from ..phone_import import parse_phone_file
 from ..tg_manager import manager
@@ -78,6 +78,26 @@ def _item_dict(row: PhoneCheckItem) -> dict:
         "cleanup_error": row.cleanup_error,
         "checked_at": row.checked_at,
     }
+
+
+
+def _item_filters(job_id: str, status: str | None = None, q: str | None = None, account_id: int | None = None):
+    clauses = [PhoneCheckItem.job_id == job_id]
+    if status:
+        clauses.append(PhoneCheckItem.status == status)
+    if account_id:
+        clauses.append(PhoneCheckItem.account_id == account_id)
+    needle = (q or "").strip()
+    if needle:
+        like = f"%{needle}%"
+        clauses.append(or_(
+            PhoneCheckItem.original_phone.ilike(like),
+            PhoneCheckItem.normalized_phone.ilike(like),
+            PhoneCheckItem.username.ilike(like),
+            PhoneCheckItem.first_name.ilike(like),
+            PhoneCheckItem.last_name.ilike(like),
+        ))
+    return clauses
 
 
 @router.post("/preview")
@@ -239,16 +259,18 @@ async def list_phone_check_jobs(
 async def phone_check_job_detail(
     job_id: str,
     status: str | None = Query(None),
-    limit: int = Query(500, ge=1, le=2000),
+    q: str | None = Query(None, max_length=100),
+    account_id: int | None = Query(None, ge=1),
+    limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
     job = await db.get(BulkJob, job_id)
     if not job or job.type != "phone_check":
         raise HTTPException(404, "Không tìm thấy tác vụ check số")
-    query = select(PhoneCheckItem).where(PhoneCheckItem.job_id == job_id)
-    if status:
-        query = query.where(PhoneCheckItem.status == status)
+    clauses = _item_filters(job_id, status, q, account_id)
+    query = select(PhoneCheckItem).where(*clauses)
+    filtered_total = int(await db.scalar(select(func.count(PhoneCheckItem.id)).where(*clauses)) or 0)
     items = (await db.execute(query.order_by(PhoneCheckItem.id).offset(offset).limit(limit))).scalars().all()
     count_rows = (await db.execute(
         select(PhoneCheckItem.status, func.count(PhoneCheckItem.id))
@@ -256,8 +278,9 @@ async def phone_check_job_detail(
         .group_by(PhoneCheckItem.status)
     )).all()
     account_rows = (await db.execute(
-        select(PhoneCheckAccount, Account)
+        select(PhoneCheckAccount, Account, AccountProxy)
         .outerjoin(Account, Account.id == PhoneCheckAccount.account_id)
+        .outerjoin(AccountProxy, AccountProxy.account_id == PhoneCheckAccount.account_id)
         .where(PhoneCheckAccount.job_id == job_id)
         .order_by(PhoneCheckAccount.id)
     )).all()
@@ -269,16 +292,26 @@ async def phone_check_job_detail(
             "name": (f"{acc.first_name or ''} {acc.last_name or ''}".strip() if acc else "") or (acc.phone if acc else "Tài khoản đã xóa"),
             "phone": acc.phone if acc else "",
             "status": row.status,
+            "telegram_status": acc.status if acc else "deleted",
+            "flood_wait_until": acc.flood_wait_until if acc else None,
+            "operation_owner": manager.operation_owner(row.account_id) if row.account_id else None,
+            "proxy": {
+                "enabled": bool(proxy and proxy.enabled),
+                "type": proxy.proxy_type if proxy else None,
+                "status": proxy.last_status if proxy else None,
+            },
             "assigned_total": row.assigned_total,
             "processed": row.processed,
             "found": row.found,
             "not_discoverable": row.not_discoverable,
             "errors": row.errors,
             "heartbeat_at": row.heartbeat_at,
-        } for row, acc in account_rows],
+        } for row, acc, proxy in account_rows],
         "items": [_item_dict(row) for row in items],
+        "filtered_total": filtered_total,
         "offset": offset,
         "limit": limit,
+        "has_more": offset + len(items) < filtered_total,
     }
 
 
@@ -326,26 +359,26 @@ async def cancel_phone_check_job(job_id: str, db: AsyncSession = Depends(get_db)
     return {"ok": True, "status": "cancelling"}
 
 
-async def _export_rows(db: AsyncSession, job_id: str):
+async def _export_rows(db: AsyncSession, job_id: str, status: str | None = None, q: str | None = None):
     job = await db.get(BulkJob, job_id)
     if not job or job.type != "phone_check":
         raise HTTPException(404, "Không tìm thấy tác vụ check số")
     rows = (await db.execute(
-        select(PhoneCheckItem).where(PhoneCheckItem.job_id == job_id).order_by(PhoneCheckItem.id)
+        select(PhoneCheckItem).where(*_item_filters(job_id, status, q)).order_by(PhoneCheckItem.id)
     )).scalars().all()
     return job, rows
 
 
 @router.get("/jobs/{job_id}/export.json")
-async def export_phone_check_json(job_id: str, db: AsyncSession = Depends(get_db)):
-    job, rows = await _export_rows(db, job_id)
+async def export_phone_check_json(job_id: str, status: str | None = Query(None), q: str | None = Query(None, max_length=100), db: AsyncSession = Depends(get_db)):
+    job, rows = await _export_rows(db, job_id, status, q)
     payload = json.dumps({"job": _job_dict(job), "results": [_item_dict(row) for row in rows]}, ensure_ascii=False, default=str)
     return StreamingResponse(io.BytesIO(payload.encode("utf-8")), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="phone-check-{job_id}.json"'})
 
 
 @router.get("/jobs/{job_id}/export.csv")
-async def export_phone_check_csv(job_id: str, db: AsyncSession = Depends(get_db)):
-    _job, rows = await _export_rows(db, job_id)
+async def export_phone_check_csv(job_id: str, status: str | None = Query(None), q: str | None = Query(None, max_length=100), db: AsyncSession = Depends(get_db)):
+    _job, rows = await _export_rows(db, job_id, status, q)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["original_phone", "normalized_phone", "status", "account_id", "telegram_user_id", "username", "first_name", "last_name", "presence", "last_online_at", "attempts", "error_code", "error_detail"])

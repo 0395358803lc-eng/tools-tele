@@ -48,7 +48,8 @@ async def update_profile(account_id: int, body: ProfileUpdateIn, db: AsyncSessio
                 raise HTTPException(400, "Tiểu sử tối đa 70 ký tự")
             kw["about"] = body.bio
         if kw:
-            await cli(UpdateProfileRequest(**kw))
+            async with manager.account_operation(account_id, "profile_update"):
+                await cli(UpdateProfileRequest(**kw))
         if body.first_name is not None: acc.first_name = body.first_name
         if body.last_name is not None: acc.last_name = body.last_name
         if body.bio is not None: acc.bio = body.bio
@@ -85,7 +86,8 @@ async def update_username(account_id: int, body: UsernameUpdateIn, db: AsyncSess
         raise HTTPException(404, "Không tìm thấy tài khoản")
     cli = _client_or_404(account_id)
     try:
-        await cli(UpdateUsernameRequest(username=body.username))
+        async with manager.account_operation(account_id, "profile_username"):
+            await cli(UpdateUsernameRequest(username=body.username))
         acc.username = body.username
         await db.commit()
         await db.refresh(acc)
@@ -121,8 +123,9 @@ async def upload_photo(account_id: int, file: UploadFile = File(...), db: AsyncS
         tmp.write(data)
         tmp_path = tmp.name
     try:
-        uploaded = await cli.upload_file(tmp_path)
-        await cli(UploadProfilePhotoRequest(file=uploaded))
+        async with manager.account_operation(account_id, "profile_photo"):
+            uploaded = await cli.upload_file(tmp_path)
+            await cli(UploadProfilePhotoRequest(file=uploaded))
         await log_audit("profile:photo", account_id, {"file_type": suffix})
     except FloodWaitError as e:
         raise HTTPException(429, f"FloodWait: chờ {e.seconds} giây")

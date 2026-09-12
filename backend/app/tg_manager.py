@@ -1,7 +1,7 @@
 """Manage one Telethon client per account, with 777000 listeners."""
 from __future__ import annotations
 import asyncio
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from collections import defaultdict, deque
 import logging
 import random
@@ -90,6 +90,12 @@ class TgClientManager:
         # global lock would serialize all 100+ accounts on boot).
         self._locks: dict[int, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
+        # Telegram business operations (check phone, bulk messaging, join/profile, etc.)
+        # share one lock per account so the same session is never driven by two
+        # independent workflows at the same time. Different accounts still run concurrently.
+        self._operation_locks: dict[int, asyncio.Lock] = {}
+        self._operation_owners: dict[int, str] = {}
+        self._operation_locks_guard = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._new_msg_callbacks: list = []
         self._inbox_events: dict[int, deque] = defaultdict(lambda: deque(maxlen=200))
@@ -134,6 +140,34 @@ class TgClientManager:
                 lk = asyncio.Lock()
                 self._locks[account_id] = lk
             return lk
+
+    async def _operation_lock(self, account_id: int) -> asyncio.Lock:
+        async with self._operation_locks_guard:
+            lk = self._operation_locks.get(account_id)
+            if lk is None:
+                lk = asyncio.Lock()
+                self._operation_locks[account_id] = lk
+            return lk
+
+    @asynccontextmanager
+    async def account_operation(self, account_id: int, owner: str):
+        """Serialize Telegram business operations for one account/session.
+
+        This lock is intentionally separate from lifecycle start/stop locks to avoid
+        deadlocks during reconnects while still preventing Check số / Messaging /
+        Join / Profile operations from racing each other on the same Telethon client.
+        """
+        lk = await self._operation_lock(account_id)
+        await lk.acquire()
+        self._operation_owners[account_id] = (owner or "operation")[:80]
+        try:
+            yield
+        finally:
+            self._operation_owners.pop(account_id, None)
+            lk.release()
+
+    def operation_owner(self, account_id: int) -> str | None:
+        return self._operation_owners.get(account_id)
 
     # ---------- helpers ----------
     def _session_path(self, phone: str) -> str:
@@ -575,8 +609,9 @@ class TgClientManager:
             acc = await db.get(Account, account_id)
             if not acc or acc.deleted_at is not None:
                 raise RuntimeError("Không tìm thấy tài khoản")
-        await self.stop_client(account_id, persist_session=True)
-        return await self.start_client(acc)
+        async with self.account_operation(account_id, "reconnect"):
+            await self.stop_client(account_id, persist_session=True)
+            return await self.start_client(acc)
 
     async def prepare_session_replacement(self, account_id: int):
         """Discard the old runtime/SQL session before an explicit re-login/import.
