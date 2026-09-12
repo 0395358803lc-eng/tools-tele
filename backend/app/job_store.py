@@ -186,6 +186,7 @@ async def recover_interrupted_jobs(stale_after_seconds: int = 180) -> int:
     async with AsyncSessionLocal() as db:
         res = await db.execute(select(BulkJob).where(
             BulkJob.status.in_(["queued", "running", "cancelling"]),
+            BulkJob.type != "phone_check",
             or_(
                 BulkJob.heartbeat_at < cutoff,
                 and_(BulkJob.heartbeat_at.is_(None), BulkJob.started_at < cutoff),

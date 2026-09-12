@@ -135,6 +135,8 @@ class AuditLifecycleTests(unittest.TestCase):
             'accounts.py:qr_sign_in_2fa',
             'messaging.py:allowed_reactions',
             'messaging.py:target_check',
+            'phone_checks.py:preview_numbers',
+            'phone_checks.py:import_numbers',
         }
         unaudited = set()
         for path in sorted((BACKEND / 'app' / 'routers').glob('*.py')):

@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / 'backend'
-WORKSPACE = ROOT.parents[1]
+WORKSPACE = ROOT
 VENV = WORKSPACE / '.venv' / 'bin' / 'python'
 PYTHON = str(VENV if VENV.exists() else Path(sys.executable))
 

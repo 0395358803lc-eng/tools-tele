@@ -15,6 +15,7 @@ import MessagingTab from './tabs/MessagingTab.jsx'
 import InboxTab from './tabs/InboxTab.jsx'
 import ProxyTab from './tabs/ProxyTab.jsx'
 import TargetCheckTab from './tabs/TargetCheckTab.jsx'
+import PhoneCheckTab from './tabs/PhoneCheckTab.jsx'
 import BulkTab from './tabs/BulkTab.jsx'
 import SettingsTab from './tabs/SettingsTab.jsx'
 import JobsTab from './tabs/JobsTab.jsx'
@@ -30,6 +31,7 @@ const TABS = [
   { id: 'inbox',     label: 'Tin nhắn đến'  },
   { id: 'proxy',     label: 'Proxy'  },
   { id: 'checker',   label: 'Kiểm tra'   },
+  { id: 'phone-check', label: 'Check số' },
   { id: 'bulk',      label: 'Hàng loạt'      },
   { id: 'jobs',      label: 'Tác vụ'      },
   { id: 'audit',     label: 'Nhật ký'     },
@@ -184,6 +186,7 @@ export default function App() {
             {tab === 'inbox'     && <InboxTab accounts={accounts} selected={selected} />}
             {tab === 'proxy'     && <ProxyTab />}
             {tab === 'checker'   && <TargetCheckTab />}
+            {tab === 'phone-check' && <PhoneCheckTab accounts={accounts} />}
             {tab === 'bulk'      && <BulkTab accounts={accounts} onDone={refreshAccounts} />}
             {tab === 'jobs'      && <JobsTab />}
             {tab === 'audit'     && <AuditTab />}

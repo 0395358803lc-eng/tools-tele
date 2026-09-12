@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PY="${PYTHON_BIN:-$ROOT/../../.venv/bin/python}"
+PY="${PYTHON_BIN:-$ROOT/.venv/bin/python}"
 if [[ "$PY" != "python" && ! -x "$PY" ]]; then PY="python"; fi
 
 if ! command -v initdb >/dev/null 2>&1 && command -v pg_config >/dev/null 2>&1; then
@@ -50,7 +50,8 @@ echo "[1/10] Alembic -> PostgreSQL"
 cd "$ROOT/backend"
 DATABASE_URL="$PGURL" DB_URL="" "$PY" -m alembic upgrade head >/dev/null
 REV="$(psql "$PGURL" -Atc "select version_num from alembic_version")"
-[[ "$REV" == "91b8c7d6e5f4" ]]
+HEAD_REV="$("$PY" -c 'from alembic.config import Config; from alembic.script import ScriptDirectory; c=Config("alembic.ini"); print(ScriptDirectory.from_config(c).get_current_head())')"
+[[ "$REV" == "$HEAD_REV" ]]
 
 TYPES="$(psql "$PGURL" -Atc "select column_name||':'||data_type from information_schema.columns where table_name in ('accounts','security_messages','telegram_sessions') and column_name in ('tg_user_id','tg_msg_id','session_ciphertext') order by table_name,column_name")"
 grep -q '^tg_user_id:bigint$' <<<"$TYPES"
@@ -81,7 +82,7 @@ DATABASE_URL="$PGURL" DB_URL="" \
 PREFLIGHT_RC=$?
 set -e
 [[ "$PREFLIGHT_RC" -ne 0 ]]
-grep -q 'Kết nối PostgreSQL thành công tại Alembic head 91b8c7d6e5f4' "$BASE/preflight.log"
+grep -q "Kết nối PostgreSQL thành công tại Alembic head $HEAD_REV" "$BASE/preflight.log"
 grep -q 'Deployment hiện là autoscale' "$BASE/preflight.log"
 grep -q 'TỔNG KẾT chặn=1' "$BASE/preflight.log"
 
@@ -235,7 +236,7 @@ echo "[10/10] Xác minh PostgreSQL đã phục hồi"
 [[ "$(psql "$RESTORE_URL" -Atc "select count(*) from accounts where phone='+10000009999'")" == "1" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select tg_user_id from accounts where phone='+10000009999'")" == "5000000001" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select parameters->>'mode' from bulk_jobs where id='pg-job-test'")" == "typed" ]]
-[[ "$(psql "$RESTORE_URL" -Atc "select version_num from alembic_version")" == "91b8c7d6e5f4" ]]
+[[ "$(psql "$RESTORE_URL" -Atc "select version_num from alembic_version")" == "$HEAD_REV" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select count(*) from accounts")" == "101" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select count(*) from bulk_job_items where status='ok'")" == "100" ]]
 

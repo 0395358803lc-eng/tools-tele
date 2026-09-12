@@ -12,7 +12,7 @@ export const ACCOUNT_STATUS_VI = {
 export const JOB_STATUS_VI = {
   queued: 'Đang xếp hàng', running: 'Đang chạy', cancelling: 'Đang hủy',
   completed: 'Hoàn tất', completed_with_errors: 'Hoàn tất có lỗi', failed: 'Thất bại',
-  cancelled: 'Đã hủy', interrupted: 'Bị gián đoạn', pending: 'Đang chờ', skipped: 'Bỏ qua', ok: 'Thành công',
+  cancelled: 'Đã hủy', interrupted: 'Bị gián đoạn', paused: 'Đã tạm dừng', pending: 'Đang chờ', skipped: 'Bỏ qua', ok: 'Thành công',
 }
 
 export const JOB_TYPE_VI = {
@@ -20,7 +20,7 @@ export const JOB_TYPE_VI = {
   change_2fa: 'Đổi 2FA hàng loạt', terminate_other_sessions: 'Chấm dứt phiên khác',
   message_send: 'Gửi tin nhắn', message_multi_send: 'Gửi nhiều người nhận', message_react: 'Thả cảm xúc', message_view: 'Xem bài viết', wipe_chat: 'Xóa cuộc trò chuyện',
   group_join: 'Tham gia nhóm/kênh', group_leave: 'Rời nhóm/kênh', group_leave_target: 'Rời mục tiêu',
-  group_leave_all: 'Rời toàn bộ nhóm/kênh', delete_own_messages: 'Xóa tin nhắn của tôi',
+  group_leave_all: 'Rời toàn bộ nhóm/kênh', delete_own_messages: 'Xóa tin nhắn của tôi', phone_check: 'Check số Telegram',
 }
 
 export const AUDIT_ACTION_VI = {
@@ -29,7 +29,7 @@ export const AUDIT_ACTION_VI = {
   'auth:qr_started': 'Bắt đầu đăng nhập QR', 'auth:qr_recreated': 'Tạo lại mã QR', 'auth:qr_cancelled': 'Hủy đăng nhập QR',
   'auth:session_folder_sync': 'Đồng bộ thư mục phiên', 'gone:cleared': 'Xóa lịch sử tài khoản mất',
   'group:join': 'Tham gia nhóm/kênh', 'group:leave': 'Rời nhóm/kênh', 'messages:delete_own': 'Xóa tin nhắn của tôi',
-  'job:cancel': 'Hủy tác vụ', 'job:retry': 'Chạy lại tác vụ', 'bot:start': 'Gửi /start cho bot',
+  'job:cancel': 'Hủy tác vụ', 'job:retry': 'Chạy lại tác vụ', 'phone_check:create': 'Tạo tác vụ check số', 'phone_check:pause': 'Tạm dừng check số', 'phone_check:resume': 'Tiếp tục check số', 'phone_check:cancel': 'Hủy check số', 'bot:start': 'Gửi /start cho bot',
   'message:chat_send': 'Gửi tin trong trò chuyện', 'message:send': 'Gửi tin nhắn hàng loạt',
   'profile:photo': 'Cập nhật ảnh hồ sơ', 'profile:update': 'Cập nhật hồ sơ', 'profile:username': 'Cập nhật tên người dùng',
   'security:backfill': 'Tải lịch sử bảo mật', 'security:message_read': 'Đánh dấu tin bảo mật đã đọc',

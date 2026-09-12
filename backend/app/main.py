@@ -16,10 +16,11 @@ from .system_status import readiness
 from .tg_manager import manager
 from .runtime_settings import load_runtime_settings
 from .job_store import recover_interrupted_jobs
+from .phone_check_runner import phone_check_runner
 from . import secrets_store
 from .auth import router as auth_router, require_auth, cleanup_auth_state
 from .security_middleware import BrowserSecurityMiddleware
-from .routers import accounts, profile, security, groups, messaging, inbox, proxies, settings as settings_router, bulk, jobs, audit, system
+from .routers import accounts, profile, security, groups, messaging, inbox, proxies, phone_checks, settings as settings_router, bulk, jobs, audit, system
 
 configure_logging()
 log = logging.getLogger("main")
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
             log.warning("Marked %d unfinished bulk job(s) as interrupted", recovered)
         manager.set_loop(asyncio.get_event_loop())
         await manager.startup_load_all()
+        await phone_check_runner.start()
 
         async def status_loop():
             while True:
@@ -68,6 +70,7 @@ async def lifespan(app: FastAPI):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        await phone_check_runner.stop()
         await manager.shutdown()
         await release_instance_lock()
 
@@ -124,6 +127,7 @@ app.include_router(groups.router,          dependencies=PROTECTED_DEPS)
 app.include_router(messaging.router,       dependencies=PROTECTED_DEPS)
 app.include_router(inbox.router,           dependencies=PROTECTED_DEPS)
 app.include_router(proxies.router,         dependencies=PROTECTED_DEPS)
+app.include_router(phone_checks.router,     dependencies=PROTECTED_DEPS)
 app.include_router(settings_router.router, dependencies=PROTECTED_DEPS)
 app.include_router(bulk.router,            dependencies=PROTECTED_DEPS)
 app.include_router(jobs.router,            dependencies=PROTECTED_DEPS)

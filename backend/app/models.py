@@ -227,6 +227,62 @@ class MessageDispatchItem(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class PhoneCheckItem(Base):
+    __tablename__ = "phone_check_items"
+    __table_args__ = (
+        UniqueConstraint("job_id", "dedupe_key", name="uq_phone_check_job_phone"),
+        Index("ix_phone_check_items_status_retry", "status", "next_retry_at"),
+        Index("ix_phone_check_items_job_account", "job_id", "account_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("bulk_jobs.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    original_phone: Mapped[str] = mapped_column(String(64))
+    normalized_phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    presence: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_online_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cleanup_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class PhoneCheckAccount(Base):
+    __tablename__ = "phone_check_accounts"
+    __table_args__ = (
+        UniqueConstraint("job_id", "account_id", name="uq_phone_check_job_account"),
+        Index("ix_phone_check_accounts_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("bulk_jobs.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    assigned_total: Mapped[int] = mapped_column(Integer, default=0)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    found: Mapped[int] = mapped_column(Integer, default=0)
+    not_discoverable: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class AccountProxy(Base):
     __tablename__ = "account_proxies"
     __table_args__ = (Index("ix_account_proxies_enabled", "enabled"),)

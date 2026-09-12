@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT/backend"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-if [[ -x "$ROOT/../../.venv/bin/python" ]]; then
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT/.venv/bin/python"
+elif [[ -x "$ROOT/../../.venv/bin/python" ]]; then
   PYTHON_BIN="$ROOT/../../.venv/bin/python"
 fi
 

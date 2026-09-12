@@ -19,7 +19,7 @@ Chỉ chạy một instance luôn hoạt động. Telegram client/listener có t
 7. Chỉ copy thật vào PostgreSQL target trống, sau đó kiểm tra số dòng từng bảng và `alembic_version`.
 8. Chạy `bash scripts/verify_postgres_integration.sh` trong môi trường maintenance/test, không chạy vào production database.
 
-Alembic head dự kiến hiện tại là `91b8c7d6e5f4` cho tới khi có migration mới.
+Alembic head hiện tại là `a4c9e2f17b63`; các script kiểm thử release phải lấy head động từ Alembic thay vì hard-code revision.
 
 ## 3. Quản lý khóa mã hóa
 

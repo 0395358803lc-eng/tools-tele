@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import job_store
 from ..db import get_db
-from ..models import Account, BulkJob, BulkJobItem, MessageDispatchItem
+from ..models import Account, BulkJob, BulkJobItem, MessageDispatchItem, PhoneCheckItem
 from ..audit import log_audit, _sanitize
 from ..utils import bulk_stream, friendly_error
 
@@ -69,6 +69,24 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
             "attempts": item.attempts,
             "error_code": item.error_code,
             "error_detail": item.detail,
+            "started_at": item.started_at,
+            "finished_at": item.finished_at,
+        } for item in res.scalars().all()]
+    elif job.type == "phone_check":
+        res = await db.execute(
+            select(PhoneCheckItem)
+            .where(PhoneCheckItem.job_id == job_id)
+            .order_by(PhoneCheckItem.id)
+            .limit(500)
+        )
+        items = [{
+            "id": item.id,
+            "account_id": item.account_id,
+            "target": item.normalized_phone or item.original_phone,
+            "status": item.status,
+            "attempts": item.attempts,
+            "error_code": item.error_code,
+            "error_detail": item.error_detail,
             "started_at": item.started_at,
             "finished_at": item.finished_at,
         } for item in res.scalars().all()]
