@@ -50,7 +50,7 @@ echo "[1/10] Alembic -> PostgreSQL"
 cd "$ROOT/backend"
 DATABASE_URL="$PGURL" DB_URL="" "$PY" -m alembic upgrade head >/dev/null
 REV="$(psql "$PGURL" -Atc "select version_num from alembic_version")"
-[[ "$REV" == "5f2a1a903d7e" ]]
+[[ "$REV" == "91b8c7d6e5f4" ]]
 
 TYPES="$(psql "$PGURL" -Atc "select column_name||':'||data_type from information_schema.columns where table_name in ('accounts','security_messages','telegram_sessions') and column_name in ('tg_user_id','tg_msg_id','session_ciphertext') order by table_name,column_name")"
 grep -q '^tg_user_id:bigint$' <<<"$TYPES"
@@ -69,7 +69,7 @@ DATABASE_URL="$PGURL" DB_URL="" \
 BAD_ORIGIN_RC=$?
 set -e
 [[ "$BAD_ORIGIN_RC" -ne 0 ]]
-grep -q 'Dev-only ALLOWED_ORIGIN entries are not allowed in production' "$BASE/preflight-bad-origin.log"
+grep -q 'Không được dùng ALLOWED_ORIGIN chỉ dành cho dev trong production' "$BASE/preflight-bad-origin.log"
 
 set +e
 DATABASE_URL="$PGURL" DB_URL="" \
@@ -81,9 +81,9 @@ DATABASE_URL="$PGURL" DB_URL="" \
 PREFLIGHT_RC=$?
 set -e
 [[ "$PREFLIGHT_RC" -ne 0 ]]
-grep -q 'PostgreSQL reachable at Alembic head 5f2a1a903d7e' "$BASE/preflight.log"
-grep -q 'Deployment target is autoscale' "$BASE/preflight.log"
-grep -q 'SUMMARY blockers=1' "$BASE/preflight.log"
+grep -q 'Kết nối PostgreSQL thành công tại Alembic head 91b8c7d6e5f4' "$BASE/preflight.log"
+grep -q 'Deployment hiện là autoscale' "$BASE/preflight.log"
+grep -q 'TỔNG KẾT chặn=1' "$BASE/preflight.log"
 
 echo "[3/10] PostgreSQL singleton advisory lock"
 cd "$ROOT/backend"
@@ -235,7 +235,7 @@ echo "[10/10] Xác minh PostgreSQL đã phục hồi"
 [[ "$(psql "$RESTORE_URL" -Atc "select count(*) from accounts where phone='+10000009999'")" == "1" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select tg_user_id from accounts where phone='+10000009999'")" == "5000000001" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select parameters->>'mode' from bulk_jobs where id='pg-job-test'")" == "typed" ]]
-[[ "$(psql "$RESTORE_URL" -Atc "select version_num from alembic_version")" == "5f2a1a903d7e" ]]
+[[ "$(psql "$RESTORE_URL" -Atc "select version_num from alembic_version")" == "91b8c7d6e5f4" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select count(*) from accounts")" == "101" ]]
 [[ "$(psql "$RESTORE_URL" -Atc "select count(*) from bulk_job_items where status='ok'")" == "100" ]]
 

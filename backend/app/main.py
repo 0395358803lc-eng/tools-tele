@@ -19,7 +19,7 @@ from .job_store import recover_interrupted_jobs
 from . import secrets_store
 from .auth import router as auth_router, require_auth, cleanup_auth_state
 from .security_middleware import BrowserSecurityMiddleware
-from .routers import accounts, profile, security, groups, messaging, settings as settings_router, bulk, jobs, audit, system
+from .routers import accounts, profile, security, groups, messaging, inbox, proxies, settings as settings_router, bulk, jobs, audit, system
 
 configure_logging()
 log = logging.getLogger("main")
@@ -122,6 +122,8 @@ app.include_router(profile.router,         dependencies=PROTECTED_DEPS)
 app.include_router(security.router,        dependencies=PROTECTED_DEPS)
 app.include_router(groups.router,          dependencies=PROTECTED_DEPS)
 app.include_router(messaging.router,       dependencies=PROTECTED_DEPS)
+app.include_router(inbox.router,           dependencies=PROTECTED_DEPS)
+app.include_router(proxies.router,         dependencies=PROTECTED_DEPS)
 app.include_router(settings_router.router, dependencies=PROTECTED_DEPS)
 app.include_router(bulk.router,            dependencies=PROTECTED_DEPS)
 app.include_router(jobs.router,            dependencies=PROTECTED_DEPS)

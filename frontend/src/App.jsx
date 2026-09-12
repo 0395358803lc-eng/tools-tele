@@ -12,6 +12,8 @@ import ProfileTab from './tabs/ProfileTab.jsx'
 import SecurityTab from './tabs/SecurityTab.jsx'
 import GroupsTab from './tabs/GroupsTab.jsx'
 import MessagingTab from './tabs/MessagingTab.jsx'
+import InboxTab from './tabs/InboxTab.jsx'
+import ProxyTab from './tabs/ProxyTab.jsx'
 import TargetCheckTab from './tabs/TargetCheckTab.jsx'
 import BulkTab from './tabs/BulkTab.jsx'
 import SettingsTab from './tabs/SettingsTab.jsx'
@@ -24,7 +26,9 @@ const TABS = [
   { id: 'profile',   label: 'Hồ sơ'   },
   { id: 'security',  label: 'Bảo mật'  },
   { id: 'groups',    label: 'Nhóm'    },
-  { id: 'messages',  label: 'Tin nhắn'  },
+  { id: 'messages',  label: 'Gửi tin nhắn'  },
+  { id: 'inbox',     label: 'Tin nhắn đến'  },
+  { id: 'proxy',     label: 'Proxy'  },
   { id: 'checker',   label: 'Kiểm tra'   },
   { id: 'bulk',      label: 'Hàng loạt'      },
   { id: 'jobs',      label: 'Tác vụ'      },
@@ -177,6 +181,8 @@ export default function App() {
             {tab === 'security'  && <SecurityTab accounts={accounts} onChange={refreshStats} />}
             {tab === 'groups'    && <GroupsTab accounts={accounts} selected={selected} />}
             {tab === 'messages'  && <MessagingTab accounts={accounts} selected={selected} />}
+            {tab === 'inbox'     && <InboxTab accounts={accounts} selected={selected} />}
+            {tab === 'proxy'     && <ProxyTab />}
             {tab === 'checker'   && <TargetCheckTab />}
             {tab === 'bulk'      && <BulkTab accounts={accounts} onDone={refreshAccounts} />}
             {tab === 'jobs'      && <JobsTab />}

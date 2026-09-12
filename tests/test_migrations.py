@@ -30,7 +30,7 @@ class MigrationTests(unittest.TestCase):
             db = sqlite3.connect(db_path)
             try:
                 revision = db.execute('select version_num from alembic_version').fetchone()[0]
-                self.assertEqual(revision, '5f2a1a903d7e')
+                self.assertEqual(revision, '91b8c7d6e5f4')
                 for table, col in [
                     ('accounts', 'tg_user_id'),
                     ('gone_accounts', 'tg_user_id'),
@@ -50,6 +50,8 @@ class MigrationTests(unittest.TestCase):
                 tg_session_cols = {r[1] for r in db.execute('pragma table_info(telegram_sessions)')}
                 self.assertIn('session_ciphertext', tg_session_cols)
                 self.assertIn('encrypted_secrets', tables)
+                self.assertIn('message_dispatch_items', tables)
+                self.assertIn('account_proxies', tables)
             finally:
                 db.close()
 

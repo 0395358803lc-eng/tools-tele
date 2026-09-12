@@ -202,6 +202,52 @@ class BulkJobItem(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class MessageDispatchItem(Base):
+    __tablename__ = "message_dispatch_items"
+    __table_args__ = (
+        UniqueConstraint("job_id", "normalized_target", name="uq_message_dispatch_job_target"),
+        Index("ix_message_dispatch_items_status", "status"),
+        Index("ix_message_dispatch_items_job_account", "job_id", "account_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("bulk_jobs.id", ondelete="CASCADE"), index=True
+    )
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    target: Mapped[str] = mapped_column(String(255))
+    normalized_target: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AccountProxy(Base):
+    __tablename__ = "account_proxies"
+    __table_args__ = (Index("ix_account_proxies_enabled", "enabled"),)
+
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    proxy_type: Mapped[str] = mapped_column(String(16), default="socks5")
+    host: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer)
+    username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    password_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rdns: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    last_status: Mapped[str] = mapped_column(String(32), default="unknown", server_default="unknown")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)

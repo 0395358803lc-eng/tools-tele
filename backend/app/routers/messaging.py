@@ -3,7 +3,7 @@ import re
 import uuid
 from urllib.parse import urlparse, parse_qs
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,14 +24,18 @@ from telethon.tl.types import (
 from ..db import get_db
 from ..models import Account, TargetCheck, TargetCheckResult
 from ..schemas import (
-    SendMessageIn, BulkMessageIn, ReactIn, ViewPostIn,
+    SendMessageIn, BulkMessageIn, MultiTargetMessageIn, ReactIn, ViewPostIn,
     AllowedReactionsIn, AllowedReactionsOut, AllowedCustomReaction,
     OpenChatIn, ChatSendIn, BulkWipeChatIn, TargetUsageCheckIn,
 )
 from ..tg_manager import manager
-from ..utils import friendly_error, bulk_stream, BulkPacer
+from ..utils import friendly_error, bulk_stream, BulkPacer, read_upload_limited
 from ..config import settings
 from ..audit import log_audit
+from ..message_dispatch import (
+    eligible_message_accounts, multi_target_message_stream, normalize_message_target, normalize_message_targets,
+)
+from ..recipient_import import parse_recipient_file
 
 router = APIRouter(prefix="/api/messaging", tags=["messaging"])
 
@@ -95,6 +99,89 @@ async def bulk_send(body: BulkMessageIn, db: AsyncSession = Depends(get_db)):
 
     return StreamingResponse(bulk_stream(accounts, _send, job_type="message_send"), media_type="application/x-ndjson")
 
+
+
+
+@router.post("/import_targets")
+async def import_message_targets(file: UploadFile = File(...)):
+    filename = file.filename or ""
+    try:
+        data = await read_upload_limited(file, 5 * 1024 * 1024)
+        parsed = parse_recipient_file(filename, data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        raise HTTPException(400, "Không thể đọc tệp người nhận")
+
+    targets: list[str] = []
+    seen: set[str] = set()
+    invalid: list[str] = []
+    duplicate_count = 0
+    for raw in parsed["raw_targets"]:
+        try:
+            display, key = normalize_message_target(raw)
+        except ValueError:
+            if len(invalid) < 20:
+                invalid.append(str(raw)[:255])
+            continue
+        if key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(key)
+        targets.append(display)
+        if len(targets) > 200:
+            raise HTTPException(400, "Tệp có hơn 200 người nhận hợp lệ. Hãy chia thành nhiều tác vụ, tối đa 200 người nhận mỗi lần.")
+
+    if not targets:
+        raise HTTPException(400, "Không tìm thấy người nhận hợp lệ trong tệp")
+    await log_audit("message:import_targets", detail={
+        "count": len(targets),
+        "rows": parsed["rows"],
+        "columns": parsed["columns"],
+        "duplicates": duplicate_count,
+        "invalid_count": len(parsed["raw_targets"]) - len(targets) - duplicate_count,
+    })
+    return {
+        "filename": filename,
+        "targets": targets,
+        "count": len(targets),
+        "rows": parsed["rows"],
+        "columns": parsed["columns"],
+        "duplicates": duplicate_count,
+        "invalid": invalid,
+        "invalid_count": len(parsed["raw_targets"]) - len(targets) - duplicate_count,
+    }
+
+
+@router.post("/multi_send")
+async def multi_send(body: MultiTargetMessageIn, db: AsyncSession = Depends(get_db)):
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Tin nhắn đang trống")
+    if not body.account_ids:
+        raise HTTPException(400, "Chưa chọn tài khoản gửi")
+    try:
+        targets = normalize_message_targets(body.targets)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    accounts = await _accounts_named(db, body.account_ids)
+    eligible, excluded = await eligible_message_accounts(accounts)
+    if not eligible:
+        detail = "Không có tài khoản nào đang kết nối và sẵn sàng gửi"
+        if excluded:
+            detail += ": " + "; ".join(f"{row['name']}: {row['reason']}" for row in excluded[:5])
+        raise HTTPException(409, detail)
+
+    await log_audit("message:multi_send", detail={
+        "accounts": len(eligible),
+        "targets": len(targets),
+        "excluded_accounts": len(excluded),
+    })
+    return StreamingResponse(
+        multi_target_message_stream(eligible, targets, text),
+        media_type="application/x-ndjson",
+    )
 
 @router.post("/react")
 async def react(body: ReactIn, db: AsyncSession = Depends(get_db)):

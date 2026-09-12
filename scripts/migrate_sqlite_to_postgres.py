@@ -21,11 +21,12 @@ TABLES = [
     'telegram_sessions', 'app_sessions', 'login_attempts',
     'account_status_history', 'bulk_jobs', 'bulk_job_items', 'audit_logs',
     'target_checks', 'target_check_results', 'encrypted_secrets',
+    'message_dispatch_items', 'account_proxies',
 ]
 SERIAL_TABLES = [
     'accounts', 'gone_accounts', 'security_messages', 'telegram_sessions',
     'app_sessions', 'login_attempts', 'account_status_history',
-    'bulk_job_items', 'audit_logs', 'target_check_results',
+    'bulk_job_items', 'audit_logs', 'target_check_results', 'message_dispatch_items',
 ]
 
 BOOLEAN_COLUMNS = {
@@ -33,6 +34,7 @@ BOOLEAN_COLUMNS = {
     'security_messages': {'is_read'},
     'telegram_sessions': {'is_primary'},
     'login_attempts': {'success'},
+    'account_proxies': {'enabled', 'rdns'},
 }
 DATETIME_COLUMNS = {
     'accounts': {'last_success_at','last_ping_at','flood_wait_until','deleted_at','created_at','updated_at'},
@@ -48,6 +50,8 @@ DATETIME_COLUMNS = {
     'audit_logs': {'created_at'},
     'target_checks': {'created_at'},
     'encrypted_secrets': {'updated_at'},
+    'message_dispatch_items': {'started_at','finished_at'},
+    'account_proxies': {'last_checked_at','created_at','updated_at'},
 }
 JSON_COLUMNS = {
     'bulk_jobs': {'parameters'},

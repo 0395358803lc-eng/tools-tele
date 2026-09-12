@@ -18,7 +18,7 @@ export const JOB_STATUS_VI = {
 export const JOB_TYPE_VI = {
   bulk_action: 'Thao tác hàng loạt', bulk_profile: 'Sửa hồ sơ hàng loạt', bulk_photo: 'Đổi ảnh hàng loạt',
   change_2fa: 'Đổi 2FA hàng loạt', terminate_other_sessions: 'Chấm dứt phiên khác',
-  message_send: 'Gửi tin nhắn', message_react: 'Thả cảm xúc', message_view: 'Xem bài viết', wipe_chat: 'Xóa cuộc trò chuyện',
+  message_send: 'Gửi tin nhắn', message_multi_send: 'Gửi nhiều người nhận', message_react: 'Thả cảm xúc', message_view: 'Xem bài viết', wipe_chat: 'Xóa cuộc trò chuyện',
   group_join: 'Tham gia nhóm/kênh', group_leave: 'Rời nhóm/kênh', group_leave_target: 'Rời mục tiêu',
   group_leave_all: 'Rời toàn bộ nhóm/kênh', delete_own_messages: 'Xóa tin nhắn của tôi',
 }

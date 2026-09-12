@@ -110,6 +110,7 @@ export default function JobsTab() {
               <div key={item.id} className="nb-card-sm p-2 flex gap-2 items-center text-xs">
                 <span className={'nb-badge text-black ' + statusClass(item.status)}>{jobStatusVi(item.status)}</span>
                 <span className="font-mono">Tài khoản #{item.account_id ?? 'đã xóa'}</span>
+                {item.target && <span className="font-mono font-bold truncate max-w-[35%]" title={item.target}>→ {item.target}</span>}
                 <span className="opacity-60">lần thử {item.attempts}</span>
                 {item.error_detail && <span className="ml-auto opacity-70 truncate max-w-[55%]" title={item.error_detail}>{item.error_detail}</span>}
               </div>

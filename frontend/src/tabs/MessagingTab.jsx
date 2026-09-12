@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Endpoints } from '../lib/api'
 import { useToast } from '../lib/toast.jsx'
 import ProgressModal from '../components/ProgressModal.jsx'
@@ -31,6 +31,22 @@ function AccountPicker({ accounts, ids, setIds }) {
 
 const keyOf = (e) => (e.custom_emoji_id ? `c:${e.custom_emoji_id}` : `s:${e.emoji}`)
 
+function parseTargetList(value) {
+  const out = []
+  const seen = new Set()
+  for (const raw of String(value || '').split(/[\n,;]+/)) {
+    const target = raw.trim()
+    if (!target) continue
+    const key = target.startsWith('+')
+      ? '+' + target.replace(/\D/g, '')
+      : target.toLowerCase().replace(/^https?:\/\//, '').replace(/^@/, '')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(target)
+  }
+  return out
+}
+
 // Split account ids across emojis by percentage. Shuffled so it's fair.
 // Leftover accounts (when total% < 100) simply don't react. custom_emoji_id is
 // carried through so premium custom emoji reactions reach the backend.
@@ -59,6 +75,10 @@ export default function MessagingTab({ accounts, selected }) {
   const [target, setTarget] = useState('')
   const [text, setText] = useState('')
   const [bulkIds, setBulkIds] = useState([])
+  const [targetsText, setTargetsText] = useState('')
+  const [importingTargets, setImportingTargets] = useState(false)
+  const [importInfo, setImportInfo] = useState(null)
+  const recipientFileRef = useRef(null)
   const [busy, setBusy] = useState(false)
 
   // react
@@ -76,6 +96,7 @@ export default function MessagingTab({ accounts, selected }) {
   const [wipeIds, setWipeIds] = useState([])
 
   const totalPct = emojis.reduce((s, e) => s + (Number(e.pct) || 0), 0)
+  const multiTargets = parseTargetList(targetsText)
 
   async function sendOne() {
     if (!selected) { toast.error('Hãy chọn một tài khoản trước'); return }
@@ -91,6 +112,43 @@ export default function MessagingTab({ accounts, selected }) {
     if (!confirm(`Gửi từ ${bulkIds.length} tài khoản?`)) return
     setBusy(true)
     await run(`Gửi hàng loạt (${bulkIds.length} tài khoản)`, (onEvent) => Endpoints.bulkSend(bulkIds, target, text, onEvent))
+    setBusy(false)
+  }
+
+  async function importRecipientFile(file) {
+    if (!file) return
+    setImportingTargets(true)
+    try {
+      const result = await Endpoints.importMessageTargets(file)
+      const merged = parseTargetList([targetsText, ...(result.targets || [])].join('\n'))
+      setTargetsText(merged.join('\n'))
+      setImportInfo(result)
+      const notes = []
+      if (result.duplicates) notes.push(`${result.duplicates} trùng`)
+      if (result.invalid_count) notes.push(`${result.invalid_count} không hợp lệ`)
+      toast.success(`Đã thêm ${result.count} người nhận từ ${result.filename}${notes.length ? ` (${notes.join(', ')})` : ''}`)
+    } catch (e) {
+      toast.error(e.message)
+    } finally {
+      setImportingTargets(false)
+      if (recipientFileRef.current) recipientFileRef.current.value = ''
+    }
+  }
+
+  async function sendMultiTargets() {
+    if (bulkIds.length === 0 || multiTargets.length === 0 || !text.trim()) {
+      toast.error('Hãy chọn tài khoản, nhập danh sách người nhận và nội dung')
+      return
+    }
+    if (!confirm(
+      `Gửi 1 lần tới ${multiTargets.length} người nhận bằng ${bulkIds.length} tài khoản?\n\n` +
+      `Danh sách sẽ được chia đều; mỗi người nhận chỉ xuất hiện một lần trong tác vụ.`
+    )) return
+    setBusy(true)
+    await run(
+      `Gửi ${multiTargets.length} người nhận (${bulkIds.length} tài khoản)`,
+      (onEvent) => Endpoints.multiSend(bulkIds, multiTargets, text, onEvent),
+    )
     setBusy(false)
   }
 
@@ -142,8 +200,70 @@ export default function MessagingTab({ accounts, selected }) {
           <AccountPicker accounts={accounts} ids={bulkIds} setIds={setBulkIds} />
         </div>
         <button className="nb-btn mt-3 w-full" disabled={busy} onClick={sendBulk}>
-          Gửi hàng loạt từ {bulkIds.length} tài khoản
+          Gửi cùng 1 người nhận từ {bulkIds.length} tài khoản
         </button>
+
+        <div className="border-t-2 border-black dark:border-white mt-4 pt-4">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="font-extrabold uppercase text-sm">Gửi nhiều người nhận</div>
+            <span className="nb-badge bg-brand-violet text-black ml-auto">{multiTargets.length} người nhận</span>
+          </div>
+          <textarea
+            className="nb-input min-h-[130px] mb-2 font-mono text-sm"
+            placeholder={'@username1\n@username2\n+84901234567\nhttps://t.me/username3'}
+            value={targetsText}
+            onChange={(e) => setTargetsText(e.target.value)}
+          />
+          <input
+            ref={recipientFileRef}
+            type="file"
+            className="hidden"
+            accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+            onChange={(e) => importRecipientFile(e.target.files?.[0])}
+          />
+          <div className="flex gap-2 mb-2">
+            <button
+              type="button"
+              className="nb-btn flex-1"
+              disabled={busy || importingTargets}
+              onClick={() => recipientFileRef.current?.click()}
+            >
+              {importingTargets ? 'Đang đọc tệp…' : 'Thêm từ CSV / Excel'}
+            </button>
+            <button
+              type="button"
+              className="nb-btn"
+              disabled={busy || !targetsText}
+              onClick={() => { setTargetsText(''); setImportInfo(null) }}
+            >
+              Xóa danh sách
+            </button>
+          </div>
+          {importInfo && (
+            <div className="nb-card-sm p-2 text-[11px] mb-2">
+              <b>{importInfo.filename}</b> · {importInfo.count} người nhận
+              {importInfo.columns?.length ? ` · cột: ${importInfo.columns.join(', ')}` : ''}
+              {importInfo.duplicates ? ` · ${importInfo.duplicates} trùng đã bỏ` : ''}
+              {importInfo.invalid_count ? ` · ${importInfo.invalid_count} dòng không hợp lệ` : ''}
+            </div>
+          )}
+          <div className="text-[11px] opacity-70 mb-2">
+            Mỗi dòng, dấu phẩy hoặc dấu chấm phẩy là một người nhận. Hệ thống tự loại trùng và chia đều cho các tài khoản đã chọn; mỗi người nhận chỉ được gửi một lần. Số điện thoại nên dùng dạng quốc tế +mã_quốc_gia và chỉ hoạt động khi Telegram của tài khoản gửi có thể nhận diện số đó.
+          </div>
+          {multiTargets.length > 200 && (
+            <div className="nb-card-sm p-2 text-[11px] bg-brand-err text-black mb-2">
+              Danh sách có {multiTargets.length} người nhận. Mỗi tác vụ hỗ trợ tối đa 200; hãy chia danh sách thành nhiều lần gửi.
+            </div>
+          )}
+          <div className="text-[11px] font-bold mb-3">Chỉ sử dụng với người nhận bạn được phép liên hệ.</div>
+          <button
+            className="nb-btn-pri w-full"
+            disabled={busy || bulkIds.length === 0 || multiTargets.length === 0 || multiTargets.length > 200 || !text.trim()}
+            onClick={sendMultiTargets}
+          >
+            Gửi danh sách — chia đều qua {bulkIds.length} tài khoản
+          </button>
+        </div>
       </div>
 
       <div className="nb-card p-4">

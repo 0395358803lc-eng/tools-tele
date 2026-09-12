@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import job_store
 from ..db import get_db
-from ..models import Account, BulkJob, BulkJobItem
+from ..models import Account, BulkJob, BulkJobItem, MessageDispatchItem
 from ..audit import log_audit, _sanitize
 from ..utils import bulk_stream, friendly_error
 
@@ -55,21 +55,39 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     job = await db.get(BulkJob, job_id)
     if not job:
         raise HTTPException(404, "Không tìm thấy tác vụ")
-    res = await db.execute(
-        select(BulkJobItem)
-        .where(BulkJobItem.job_id == job_id)
-        .order_by(BulkJobItem.id)
-    )
-    items = [{
-        "id": item.id,
-        "account_id": item.account_id,
-        "status": item.status,
-        "attempts": item.attempts,
-        "error_code": item.error_code,
-        "error_detail": item.error_detail,
-        "started_at": item.started_at,
-        "finished_at": item.finished_at,
-    } for item in res.scalars().all()]
+    if job.type == "message_multi_send":
+        res = await db.execute(
+            select(MessageDispatchItem)
+            .where(MessageDispatchItem.job_id == job_id)
+            .order_by(MessageDispatchItem.id)
+        )
+        items = [{
+            "id": item.id,
+            "account_id": item.account_id,
+            "target": item.target,
+            "status": item.status,
+            "attempts": item.attempts,
+            "error_code": item.error_code,
+            "error_detail": item.detail,
+            "started_at": item.started_at,
+            "finished_at": item.finished_at,
+        } for item in res.scalars().all()]
+    else:
+        res = await db.execute(
+            select(BulkJobItem)
+            .where(BulkJobItem.job_id == job_id)
+            .order_by(BulkJobItem.id)
+        )
+        items = [{
+            "id": item.id,
+            "account_id": item.account_id,
+            "status": item.status,
+            "attempts": item.attempts,
+            "error_code": item.error_code,
+            "error_detail": item.error_detail,
+            "started_at": item.started_at,
+            "finished_at": item.finished_at,
+        } for item in res.scalars().all()]
     out = _job_dict(job)
     out["items"] = items
     return out

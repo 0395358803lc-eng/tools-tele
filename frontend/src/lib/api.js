@@ -190,6 +190,8 @@ export const Endpoints = {
 
   sendMessage: (id, target, text) => api.post(`/api/messaging/${id}/send`, { target, text }),
   bulkSend: (ids, target, text, onEvent) => streamNDJSON('/api/messaging/bulk_send', { account_ids: ids, target, text }, onEvent),
+  multiSend: (ids, targets, text, onEvent) => streamNDJSON('/api/messaging/multi_send', { account_ids: ids, targets, text }, onEvent),
+  importMessageTargets: (file) => { const fd = new FormData(); fd.append('file', file); return api.postForm('/api/messaging/import_targets', fd) },
   // wipe the ENTIRE chat with one user (by @username / t.me link) from selected
   // accounts: clears history for both sides (revoke) and removes the dialog
   bulkWipeChat: (ids, target, onEvent) => streamNDJSON('/api/messaging/bulk_wipe_chat', { account_ids: ids, target, confirm: true }, onEvent),
@@ -199,9 +201,21 @@ export const Endpoints = {
   openChat: (id, input, limit = 40) => api.post(`/api/messaging/${id}/open`, { input, limit }),
   chatHistory: (id, peer, limit = 40) => api.get(`/api/messaging/${id}/history`, { peer, limit }),
   chatSend: (id, peer, text) => api.post(`/api/messaging/${id}/chat_send`, { peer, text }),
+
+  // Inbox: live Telegram dialogs for each connected session. Message bodies stay on Telegram.
+  inboxActivity: (sinceSeq = 0) => api.get('/api/inbox/activity', { since_seq: sinceSeq }),
+  inboxDialogs: (id, limit = 60, unreadOnly = false) => api.get(`/api/inbox/${id}/dialogs`, { limit, unread_only: unreadOnly }),
+  inboxHistory: (id, peer, limit = 60) => api.get(`/api/inbox/${id}/history`, { peer, limit }),
+  inboxMarkRead: (id, peer) => api.post(`/api/inbox/${id}/read`, { peer }),
+  inboxReply: (id, peer, text) => api.post(`/api/inbox/${id}/reply`, { peer, text }),
   targetCheck: (target) => api.post('/api/messaging/target_check', { target }),
   targetChecks: (limit = 30) => api.get('/api/messaging/target_checks', { limit }),
   targetCheckDetail: (id) => api.get(`/api/messaging/target_checks/${id}`),
+  proxies: () => api.get('/api/proxies'),
+  saveProxy: (id, payload) => api.put(`/api/proxies/${id}`, payload),
+  deleteProxy: (id) => api.del(`/api/proxies/${id}`),
+  testProxy: (id) => api.post(`/api/proxies/${id}/test`),
+  applyProxy: (id) => api.post(`/api/proxies/${id}/apply`),
   // which reactions this post's chat actually allows (standard + custom emoji)
   allowedReactions: (post_link, account_id) => api.post('/api/messaging/allowed_reactions', { post_link, account_id }),
   // reactions: [{ emoji, account_ids, custom_emoji_id? }]

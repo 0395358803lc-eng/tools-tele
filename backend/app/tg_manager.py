@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 from contextlib import suppress
+from collections import defaultdict, deque
 import logging
 import random
 import time
@@ -32,6 +33,7 @@ from .db import AsyncSessionLocal
 from .models import Account, SecurityMessage, GoneAccount, AccountStatusHistory
 from . import secrets_store
 from . import telegram_session_store
+from . import proxy_store
 from .telegram_errors import classify_error
 
 log = logging.getLogger("tg_manager")
@@ -90,6 +92,8 @@ class TgClientManager:
         self._locks_guard = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._new_msg_callbacks: list = []
+        self._inbox_events: dict[int, deque] = defaultdict(lambda: deque(maxlen=200))
+        self._inbox_seq = 0
         self._session_scan_lock = asyncio.Lock()
         self._session_scan_seen: dict[str, tuple[int, int]] = {}
         self._background_tasks: set[asyncio.Task] = set()
@@ -476,7 +480,16 @@ class TgClientManager:
             except Exception as exc:
                 log.warning("encrypted session load failed for %s: %s", acc.phone, exc)
             session_backend = StringSession(stored_session) if stored_session else self._session_path_for_account(acc)
-            cli = TelegramClient(session_backend, settings.TG_API_ID, settings.TG_API_HASH)
+            try:
+                account_proxy = await proxy_store.runtime_proxy(acc.id)
+            except Exception as exc:
+                await proxy_store.mark_proxy_status(acc.id, "config_failed", str(exc))
+                await self._set_status(acc.id, "disconnected", "Không thể đọc cấu hình proxy")
+                raise
+            cli = TelegramClient(
+                session_backend, settings.TG_API_ID, settings.TG_API_HASH,
+                proxy=account_proxy,
+            )
             await self._set_status(acc.id, "connecting")
             try:
                 await asyncio.wait_for(cli.connect(), timeout=20)
@@ -490,6 +503,8 @@ class TgClientManager:
                 self._clear_reconnect_backoff(acc.id)
                 self._attach_listener(acc.id, cli)
                 await self._set_status(acc.id, "connected")
+                if account_proxy:
+                    await proxy_store.mark_proxy_status(acc.id, "connected")
                 try:
                     await telegram_session_store.save(acc.id, cli, acc.session_file)
                 except Exception as exc:
@@ -527,6 +542,8 @@ class TgClientManager:
                     await cli.disconnect()
                 except Exception:
                     pass
+                if account_proxy:
+                    await proxy_store.mark_proxy_status(acc.id, "connect_failed", str(exc))
                 # Preserve an explicit auth_required state set above.
                 if str(exc) != "not authorized":
                     await self.mark_operation_error(acc.id, exc)
@@ -547,6 +564,19 @@ class TgClientManager:
                 await cli.disconnect()
             except Exception:
                 pass
+
+    async def reconnect_account(self, account_id: int) -> TelegramClient:
+        """Reconnect one account so a changed per-account proxy takes effect.
+
+        Telethon applies proxy changes on the next connection. We deliberately
+        do not fall back to a direct socket when an enabled proxy fails.
+        """
+        async with AsyncSessionLocal() as db:
+            acc = await db.get(Account, account_id)
+            if not acc or acc.deleted_at is not None:
+                raise RuntimeError("Không tìm thấy tài khoản")
+        await self.stop_client(account_id, persist_session=True)
+        return await self.start_client(acc)
 
     async def prepare_session_replacement(self, account_id: int):
         """Discard the old runtime/SQL session before an explicit re-login/import.
@@ -845,6 +875,26 @@ class TgClientManager:
 
     # ---------- listener ----------
     def _attach_listener(self, account_id: int, cli: TelegramClient):
+        @cli.on(events.NewMessage(incoming=True))
+        async def _inbox_handler(event):
+            try:
+                sender_id = getattr(event, "sender_id", None)
+                if sender_id == SERVICE_ID:
+                    return
+                msg = event.message
+                self._inbox_seq += 1
+                self._inbox_events[account_id].append({
+                    "seq": self._inbox_seq,
+                    "account_id": account_id,
+                    "peer_id": getattr(event, "chat_id", None),
+                    "sender_id": sender_id,
+                    "message_id": getattr(msg, "id", 0),
+                    "text_preview": (getattr(msg, "message", None) or "")[:160],
+                    "received_at": (getattr(msg, "date", None) or utcnow()).isoformat(),
+                })
+            except Exception as exc:
+                log.warning("inbox event capture failed for account %s: %s", account_id, exc)
+
         @cli.on(events.NewMessage(from_users=SERVICE_ID))
         async def _handler(event):
             try:
@@ -877,6 +927,16 @@ class TgClientManager:
                         pass
             except Exception as e:
                 log.exception("777000 handler failed: %s", e)
+
+    def inbox_activity(self, since_seq: int = 0) -> dict:
+        events = []
+        latest_seq = self._inbox_seq
+        for rows in self._inbox_events.values():
+            for row in rows:
+                if row["seq"] > since_seq:
+                    events.append(dict(row))
+        events.sort(key=lambda row: row["seq"])
+        return {"latest_seq": latest_seq, "events": events[-200:]}
 
     def subscribe_new_messages(self, cb):
         self._new_msg_callbacks.append(cb)

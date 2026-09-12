@@ -192,6 +192,12 @@ class BulkMessageIn(BaseModel):
     text: str
 
 
+class MultiTargetMessageIn(BaseModel):
+    account_ids: list[int]
+    targets: list[str]
+    text: str
+
+
 class BulkWipeChatIn(BaseModel):
     """Delete the ENTIRE conversation with one user/chat (by @username or t.me
     link) from every selected account: clears history for both sides (revoke)

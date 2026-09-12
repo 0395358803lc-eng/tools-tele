@@ -11,3 +11,6 @@ bcrypt>=4.2.0
 asyncpg>=0.30.0
 alembic>=1.14.0
 cryptography>=44.0.0
+openpyxl>=3.1.5
+xlrd>=2.0.1
+python-socks[asyncio]>=2.7.2
