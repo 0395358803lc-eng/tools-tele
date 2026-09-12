@@ -273,10 +273,19 @@ class SettingsIn(BaseModel):
     sessions_dir: str
     auto_reconnect: bool
     notification_sound: bool
+    tg_api_id: Optional[int] = None
+    tg_api_hash: Optional[str] = None
 
 
-class SettingsOut(SettingsIn):
-    pass
+class SettingsOut(BaseModel):
+    rate_min: float
+    rate_max: float
+    concurrency: int = 5
+    sessions_dir: str
+    auto_reconnect: bool
+    notification_sound: bool
+    tg_api_id: Optional[int] = None
+    tg_api_hash_configured: bool = False
 
 
 class BulkProgressEvent(BaseModel):

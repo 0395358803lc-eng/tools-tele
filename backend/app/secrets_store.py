@@ -34,6 +34,45 @@ def _decode_legacy(blob: bytes) -> dict[str,str]:
     plain=_cipher().decrypt(blob); data=json.loads(plain.decode('utf-8') or '{}')
     return {str(k):str(v) for k,v in data.items() if v} if isinstance(data,dict) else {}
 
+
+
+async def save_named_secret(key: str, value: str) -> None:
+    if not key or not value:
+        raise ValueError("Secret key/value must not be empty")
+    async with _lock:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(EncryptedSecret, key)
+            cipher = encrypt_value(value)
+            if row:
+                row.ciphertext = cipher
+                row.updated_at = utcnow()
+            else:
+                db.add(EncryptedSecret(key=key, ciphertext=cipher, updated_at=utcnow()))
+            await db.commit()
+
+
+async def get_named_secret(key: str) -> str | None:
+    async with AsyncSessionLocal() as db:
+        row = await db.get(EncryptedSecret, key)
+        return decrypt_value(row.ciphertext) if row else None
+
+
+async def save_telegram_api_config(api_id: int, api_hash: str) -> None:
+    await save_named_secret("telegram:api_id", str(int(api_id)))
+    await save_named_secret("telegram:api_hash", api_hash.strip())
+    settings.TG_API_ID = int(api_id)
+    settings.TG_API_HASH = api_hash.strip()
+
+
+async def load_telegram_api_config() -> bool:
+    api_id = await get_named_secret("telegram:api_id")
+    api_hash = await get_named_secret("telegram:api_hash")
+    if not api_id or not api_hash:
+        return False
+    settings.TG_API_ID = int(api_id)
+    settings.TG_API_HASH = api_hash
+    return True
+
 async def save_2fa(phone: str, password: str):
     if not phone or not password: return
     key='twofa:'+_norm_phone(phone)

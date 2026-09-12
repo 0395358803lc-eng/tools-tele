@@ -43,8 +43,11 @@ async def lifespan(app: FastAPI):
             migrated_secrets = await secrets_store.migrate_legacy_to_db()
             if migrated_secrets:
                 log.info("Migrated %d legacy encrypted secret(s) into SQL", migrated_secrets)
+            loaded_api = await secrets_store.load_telegram_api_config()
+            if loaded_api:
+                log.info("Loaded encrypted Telegram API configuration from SQL")
         except Exception as exc:
-            log.warning("Legacy secret migration skipped: %s", exc)
+            log.warning("Encrypted runtime secret loading skipped: %s", exc)
         recovered = await recover_interrupted_jobs()
         if recovered:
             log.warning("Marked %d unfinished bulk job(s) as interrupted", recovered)

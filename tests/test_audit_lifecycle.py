@@ -25,6 +25,8 @@ class AuditLifecycleTests(unittest.TestCase):
 
             async def main():
                 captured=[]
+                accounts.settings.TG_API_ID=12345
+                accounts.settings.TG_API_HASH='a'*32
                 async def fake_send_code(phone): return 'server-hash'
                 async def fake_audit(action, account_id=None, detail=None):
                     captured.append((action, account_id, detail or {}))

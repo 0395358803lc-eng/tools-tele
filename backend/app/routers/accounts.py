@@ -17,12 +17,18 @@ from ..schemas import (
 from ..tg_manager import manager, record_gone_account
 from ..auth import verify_app_password
 from ..audit import log_audit
+from ..config import settings
 from ..utils import friendly_error, public_error_message, read_upload_limited
 
 router = APIRouter(prefix="/api", tags=["accounts"])
 
 MAX_SESSION_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_SESSION_UPLOAD_FILES = 200
+
+
+def _require_telegram_api_config() -> None:
+    if not settings.TG_API_ID or not (settings.TG_API_HASH or "").strip():
+        raise HTTPException(409, "Chưa cấu hình Telegram App api_id/api_hash. Hãy vào Cài đặt → Telegram API để nhập trước.")
 
 
 def _verify_sqlite_session(path: str) -> None:
@@ -173,6 +179,7 @@ async def stats(db: AsyncSession = Depends(get_db)):
 # ----- Auth -----
 @router.post("/auth/send_code")
 async def send_code(body: SendCodeIn):
+    _require_telegram_api_config()
     try:
         await asyncio.wait_for(manager.send_code(body.phone), timeout=45)
     except asyncio.TimeoutError:
@@ -410,6 +417,7 @@ async def auth_cancel(body: SendCodeIn):
 # ----- QR Auth -----
 @router.post("/auth/qr/start", response_model=QrStartOut)
 async def qr_start():
+    _require_telegram_api_config()
     try:
         info = await asyncio.wait_for(manager.qr_start(), timeout=45)
     except asyncio.TimeoutError:

@@ -6,6 +6,7 @@ export default function SettingsTab() {
   const toast = useToast()
   const [s, setS] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [apiHash, setApiHash] = useState('')
 
   useEffect(() => {
     Endpoints.getSettings().then(setS).catch((e) => toast.error(e.message))
@@ -16,8 +17,10 @@ export default function SettingsTab() {
   async function save() {
     setBusy(true)
     try {
-      const r = await Endpoints.putSettings(s)
+      const payload = { ...s, tg_api_hash: apiHash.trim() || null }
+      const r = await Endpoints.putSettings(payload)
       setS(r)
+      setApiHash('')
       window.dispatchEvent(new CustomEvent('mtm-settings-updated', { detail: r }))
       toast.success('Đã lưu cài đặt')
     } catch (e) { toast.error(e.message) } finally { setBusy(false) }
@@ -37,6 +40,33 @@ export default function SettingsTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
+      <div className="nb-card p-5">
+        <h3 className="font-extrabold uppercase mb-4">Telegram API</h3>
+        <p className="text-xs opacity-70 mb-3">
+          Cấu hình App api_id và api_hash lấy từ my.telegram.org. API Hash được mã hóa ở backend và không bao giờ được trả lại trình duyệt sau khi lưu.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <label>
+            <div className="text-xs font-bold uppercase mb-1">App api_id</div>
+            <input type="number" min="1" step="1" className="nb-input"
+              value={s.tg_api_id ?? ''}
+              onChange={(e) => setS({ ...s, tg_api_id: e.target.value ? Number(e.target.value) : null })} />
+          </label>
+          <label>
+            <div className="text-xs font-bold uppercase mb-1">App api_hash</div>
+            <input type="password" autoComplete="off" className="nb-input"
+              placeholder={s.tg_api_hash_configured ? 'Đã cấu hình — để trống nếu giữ nguyên' : 'Nhập api_hash 32 ký tự'}
+              value={apiHash}
+              onChange={(e) => setApiHash(e.target.value.trim())} />
+          </label>
+        </div>
+        <div className="mt-2 text-xs">
+          Trạng thái: <span className={`font-bold ${s.tg_api_id && s.tg_api_hash_configured ? 'text-green-600' : 'text-amber-600'}`}>
+            {s.tg_api_id && s.tg_api_hash_configured ? 'Đã cấu hình đầy đủ' : 'Chưa cấu hình đầy đủ'}
+          </span>
+        </div>
+      </div>
+
       <div className="nb-card p-5">
         <h3 className="font-extrabold uppercase mb-4">Khoảng giới hạn tốc độ</h3>
         <p className="text-xs opacity-70 mb-3">

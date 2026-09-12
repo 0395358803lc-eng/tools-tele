@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -10,6 +11,8 @@ from ..models import Account, AppSetting
 from ..runtime_settings import apply_runtime, defaults
 from ..schemas import SettingsIn, SettingsOut
 from ..audit import log_audit
+from ..config import settings
+from .. import secrets_store
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -33,6 +36,8 @@ def _to_out(cur: dict[str, str]) -> SettingsOut:
         sessions_dir=cur["sessions_dir"],
         auto_reconnect=cur["auto_reconnect"].lower() == "true",
         notification_sound=cur["notification_sound"].lower() == "true",
+        tg_api_id=(int(settings.TG_API_ID) if settings.TG_API_ID else None),
+        tg_api_hash_configured=bool((settings.TG_API_HASH or "").strip()),
     )
 
 
@@ -51,6 +56,17 @@ async def update_settings(body: SettingsIn, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Số tác vụ chạy song song phải từ 1 đến 50")
     if not body.sessions_dir.strip():
         raise HTTPException(400, "Đường dẫn thư mục phiên không được để trống")
+
+    api_hash_input = (body.tg_api_hash or "").strip()
+    api_config_changed = body.tg_api_id is not None or bool(api_hash_input)
+    if api_config_changed:
+        api_id = int(body.tg_api_id or settings.TG_API_ID or 0)
+        api_hash = api_hash_input or (settings.TG_API_HASH or "").strip()
+        if api_id <= 0:
+            raise HTTPException(400, "Telegram App api_id phải là số nguyên dương")
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
+            raise HTTPException(400, "Telegram App api_hash phải gồm đúng 32 ký tự hexadecimal")
+        await secrets_store.save_telegram_api_config(api_id, api_hash)
 
     payload = {
         "rate_min": str(body.rate_min),
@@ -77,6 +93,8 @@ async def update_settings(body: SettingsIn, db: AsyncSession = Depends(get_db)):
         "concurrency": int(body.concurrency),
         "auto_reconnect": body.auto_reconnect,
         "notification_sound": body.notification_sound,
+        "telegram_api_id": int(settings.TG_API_ID) if settings.TG_API_ID else None,
+        "telegram_api_hash_changed": bool(api_hash_input),
     })
     return _to_out(payload)
 
