@@ -3,6 +3,7 @@ import { Endpoints } from '../lib/api'
 import { fmtTime } from '../lib/util'
 import { jobStatusVi, jobTypeVi } from '../lib/vi'
 import { useToast } from '../lib/toast.jsx'
+import RealtimeLogPanel from '../components/RealtimeLogPanel.jsx'
 
 const ACTIVE = new Set(['queued', 'running', 'paused', 'cancelling'])
 const RETRY_ITEMS = new Set(['failed', 'pending', 'queued', 'running'])
@@ -147,6 +148,7 @@ export default function JobsTab() {
       </div>
 
       {selected && (
+        <div className="space-y-4">
         <div className="nb-card p-4">
           <div className="flex items-center gap-2 mb-3">
             <div><div className="font-extrabold uppercase">{jobTypeVi(selected.type)}</div><div className="text-[10px] font-mono opacity-60">{selected.id}</div></div>
@@ -195,6 +197,8 @@ export default function JobsTab() {
               </div>
             ))}
           </div>
+        </div>
+        <RealtimeLogPanel title="Nhật ký realtime của tác vụ" initialFilters={{ job_id: selected.id }} compact />
         </div>
       )}
     </div>

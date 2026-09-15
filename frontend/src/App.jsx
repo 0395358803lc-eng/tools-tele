@@ -22,6 +22,7 @@ const TargetCheckTab = lazy(() => import('./tabs/TargetCheckTab.jsx'))
 const PhoneCheckTab = lazy(() => import('./tabs/PhoneCheckTab.jsx'))
 const BulkTab = lazy(() => import('./tabs/BulkTab.jsx'))
 const SettingsTab = lazy(() => import('./tabs/SettingsTab.jsx'))
+const ActivityTab = lazy(() => import('./tabs/ActivityTab.jsx'))
 const JobsTab = lazy(() => import('./tabs/JobsTab.jsx'))
 const AuditTab = lazy(() => import('./tabs/AuditTab.jsx'))
 const SystemTab = lazy(() => import('./tabs/SystemTab.jsx'))
@@ -37,6 +38,7 @@ const TABS = [
   { id: 'checker',   label: 'Kiểm tra'   },
   { id: 'phone-check', label: 'Check số' },
   { id: 'bulk',      label: 'Hàng loạt'      },
+  { id: 'activity',  label: 'Hoạt động realtime' },
   { id: 'jobs',      label: 'Tác vụ'      },
   { id: 'audit',     label: 'Nhật ký'     },
   { id: 'system',    label: 'Hệ thống'    },
@@ -210,6 +212,7 @@ export default function App() {
             {tab === 'checker'   && <TargetCheckTab />}
             {tab === 'phone-check' && <PhoneCheckTab accounts={accounts} />}
             {tab === 'bulk'      && <BulkTab accounts={accounts} onDone={refreshAccounts} />}
+            {tab === 'activity'  && <ActivityTab accounts={accounts} />}
             {tab === 'jobs'      && <JobsTab />}
             {tab === 'audit'     && <AuditTab />}
             {tab === 'system'    && <SystemTab />}
