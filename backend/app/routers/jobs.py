@@ -41,6 +41,14 @@ def _job_dict(job: BulkJob) -> dict:
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
+        "heartbeat_at": job.heartbeat_at,
+        "updated_at": job.updated_at,
+        "paused_at": job.paused_at,
+        "resume_count": job.resume_count or 0,
+        "checkpoint": job.checkpoint or {},
+        "last_error_code": job.last_error_code,
+        "last_error_detail": job.last_error_detail,
+        "resumable": job.type in job_store.RESUMABLE_JOB_TYPES,
     }
 
 
@@ -76,6 +84,7 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
             "error_detail": item.detail,
             "started_at": item.started_at,
             "finished_at": item.finished_at,
+            "next_retry_at": item.next_retry_at,
         } for item in res.scalars().all()]
     elif job.type == "phone_check":
         res = await db.execute(
@@ -94,6 +103,7 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
             "error_detail": item.error_detail,
             "started_at": item.started_at,
             "finished_at": item.finished_at,
+            "next_retry_at": item.next_retry_at,
         } for item in res.scalars().all()]
     else:
         res = await db.execute(
@@ -119,8 +129,10 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
         safe_retry = sum(1 for item in items if item["status"] == "pending" and item.get("error_code") == "FloodWaitError" and int(item.get("attempts") or 0) == 0)
         delivered = int(counts.get("ok", 0))
         out["delivery"] = {
-            "delivered": delivered, "failed": int(counts.get("failed", 0)),
-            "pending": int(counts.get("pending", 0)), "skipped": int(counts.get("skipped", 0)),
+            "delivered": delivered,
+            "failed": int(counts.get("failed", 0)) + int(counts.get("in_flight_unknown", 0)),
+            "pending": sum(int(counts.get(k, 0)) for k in ("queued", "processing", "rate_limited", "pending")),
+            "skipped": int(counts.get("skipped", 0)) + int(counts.get("cancelled", 0)),
             "attempted": sum(1 for item in items if int(item.get("attempts") or 0) > 0),
             "safe_retry": safe_retry,
             "delivery_rate": round((delivered / len(items)) * 100, 2) if items else 0.0,
@@ -130,7 +142,7 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
 
 _EXPORT_FIELDS = [
     "id", "account_id", "target", "status", "attempts", "error_code",
-    "error_detail", "started_at", "finished_at",
+    "error_detail", "started_at", "finished_at", "next_retry_at",
 ]
 
 def _export_value(value):
@@ -173,6 +185,34 @@ async def export_job_xlsx(job_id: str, db: AsyncSession = Depends(get_db)):
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={
         "Content-Disposition": f'attachment; filename="job-{job_id}.xlsx"'
     })
+
+
+@router.post("/{job_id}/pause")
+async def pause_job(job_id: str, db: AsyncSession = Depends(get_db)):
+    job = await db.get(BulkJob, job_id)
+    if not job:
+        raise HTTPException(404, "Không tìm thấy tác vụ")
+    if job.type not in job_store.RESUMABLE_JOB_TYPES:
+        raise HTTPException(400, "Loại tác vụ này không hỗ trợ tạm dừng an toàn")
+    accepted = await job_store.pause_job(job_id)
+    if not accepted:
+        raise HTTPException(409, "Tác vụ hiện không thể tạm dừng")
+    await log_audit("job:pause", detail={"job_id": job_id})
+    return {"ok": True, "job_id": job_id, "status": "paused"}
+
+
+@router.post("/{job_id}/resume")
+async def resume_job(job_id: str, db: AsyncSession = Depends(get_db)):
+    job = await db.get(BulkJob, job_id)
+    if not job:
+        raise HTTPException(404, "Không tìm thấy tác vụ")
+    if job.type not in job_store.RESUMABLE_JOB_TYPES:
+        raise HTTPException(400, "Loại tác vụ này không hỗ trợ tiếp tục an toàn")
+    accepted = await job_store.resume_job(job_id)
+    if not accepted:
+        raise HTTPException(409, "Tác vụ hiện không thể tiếp tục")
+    await log_audit("job:resume", detail={"job_id": job_id})
+    return {"ok": True, "job_id": job_id, "status": "queued"}
 
 
 @router.post("/{job_id}/cancel")

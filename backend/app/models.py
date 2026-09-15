@@ -187,6 +187,12 @@ class BulkJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     runner_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=utcnow, onupdate=utcnow)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resume_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    checkpoint: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class BulkJobItem(Base):
@@ -219,6 +225,8 @@ class MessageDispatchItem(Base):
         UniqueConstraint("job_id", "normalized_target", name="uq_message_dispatch_job_target"),
         Index("ix_message_dispatch_items_status", "status"),
         Index("ix_message_dispatch_items_job_account", "job_id", "account_id"),
+        Index("ix_message_dispatch_items_status_retry", "status", "next_retry_at"),
+        Index("ix_message_dispatch_items_processing_token", "processing_token"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -232,10 +240,14 @@ class MessageDispatchItem(Base):
     normalized_target: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), default="queued")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    processing_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class PhoneCheckItem(Base):

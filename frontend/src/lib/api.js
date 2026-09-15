@@ -277,6 +277,8 @@ export const Endpoints = {
 
   jobs: (limit = 50) => api.get('/api/jobs', { limit }),
   job: (id) => api.get(`/api/jobs/${id}`),
+  pauseJob: (id) => api.post(`/api/jobs/${id}/pause`),
+  resumeJob: (id) => api.post(`/api/jobs/${id}/resume`),
   cancelJob: (id) => api.post(`/api/jobs/${id}/cancel`),
   retryJob: (id, onEvent) => streamNDJSON(`/api/jobs/${id}/retry`, {}, onEvent),
   retryMessageJob: (id, text, onEvent) => streamNDJSON(`/api/jobs/${id}/retry-message`, { text }, onEvent),

@@ -105,6 +105,18 @@ async def save_named_secret(name: str, value: str, user_id: str | None = None) -
                 await db.commit()
 
 
+async def delete_named_secret(name: str, user_id: str | None = None) -> bool:
+    uid, key = _storage_key(name, user_id)
+    with tenant_scope(uid):
+        async with AsyncSessionLocal() as db:
+            row = await db.get(EncryptedSecret, key)
+            if not row:
+                return False
+            await db.delete(row)
+            await db.commit()
+            return True
+
+
 async def get_named_secret(name: str, user_id: str | None = None) -> str | None:
     uid, key = _storage_key(name, user_id)
     with tenant_scope(uid):

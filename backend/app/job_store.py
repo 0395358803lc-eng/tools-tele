@@ -16,6 +16,10 @@ from .quota import assert_job_capacity
 _cancel_events: dict[str, asyncio.Event] = {}
 RUNNER_ID = uuid.uuid4().hex
 
+ACTIVE_JOB_STATUSES = {"queued", "running", "paused", "cancelling"}
+TERMINAL_JOB_STATUSES = {"completed", "completed_with_errors", "cancelled", "failed", "interrupted"}
+RESUMABLE_JOB_TYPES = {"phone_check", "message_multi_send"}
+
 
 async def create_job(
     job_type: str,
@@ -42,6 +46,7 @@ async def create_job(
             started_at=now,
             runner_id=RUNNER_ID,
             heartbeat_at=now,
+            updated_at=now,
         ))
         for aid, _phone, _name in accounts:
             db.add(BulkJobItem(
@@ -59,7 +64,9 @@ async def create_job(
 async def _touch_job(db, job_id: str) -> None:
     job = await db.get(BulkJob, job_id)
     if job:
-        job.heartbeat_at = utcnow()
+        now = utcnow()
+        job.heartbeat_at = now
+        job.updated_at = now
 
 
 async def mark_item_started(job_id: str, account_id: int) -> None:
@@ -115,7 +122,10 @@ async def update_counts(
         job.failed = failed
         job.skipped = skipped
         job.pending = pending
-        job.heartbeat_at = utcnow()
+        now = utcnow()
+        job.heartbeat_at = now
+        job.updated_at = now
+        job.checkpoint = {"success": success, "failed": failed, "skipped": skipped, "pending": pending}
         await db.commit()
 
 
@@ -139,6 +149,9 @@ async def finish_job(
             job.pending = pending
             job.finished_at = now
             job.heartbeat_at = now
+            job.updated_at = now
+            job.runner_id = None
+            job.checkpoint = {"success": success, "failed": failed, "skipped": skipped, "pending": pending}
             db.add(AuditLog(
                 user_id=job.user_id,
                 action=f"bulk:{job.type}"[:64],
@@ -163,14 +176,82 @@ async def request_cancel(job_id: str) -> bool:
         job = await db.get(BulkJob, job_id)
         if not job:
             return False
-        if job.status in {"completed", "completed_with_errors", "cancelled", "failed", "interrupted"}:
+        if job.status in TERMINAL_JOB_STATUSES:
             return False
+        now = utcnow()
         job.status = "cancelling"
-        job.heartbeat_at = utcnow()
+        job.heartbeat_at = now
+        job.updated_at = now
         await db.commit()
     if event:
         event.set()
     return True
+
+
+async def pause_job(job_id: str) -> bool:
+    async with AsyncSessionLocal() as db:
+        job = await db.get(BulkJob, job_id)
+        if not job or job.status not in {"queued", "running"}:
+            return False
+        now = utcnow()
+        job.status = "paused"
+        job.paused_at = now
+        job.heartbeat_at = now
+        job.updated_at = now
+        await db.commit()
+        return True
+
+
+async def resume_job(job_id: str) -> bool:
+    async with AsyncSessionLocal() as db:
+        job = await db.get(BulkJob, job_id)
+        if not job or job.status not in {"paused", "interrupted"}:
+            return False
+        now = utcnow()
+        job.status = "queued" if job.type in RESUMABLE_JOB_TYPES else "running"
+        job.paused_at = None
+        job.finished_at = None
+        job.runner_id = None if job.type in RESUMABLE_JOB_TYPES else RUNNER_ID
+        job.resume_count = (job.resume_count or 0) + 1
+        job.heartbeat_at = now
+        job.updated_at = now
+        await db.commit()
+        return True
+
+
+async def heartbeat_job(job_id: str, runner_id: str | None = None, checkpoint: dict | None = None) -> bool:
+    async with AsyncSessionLocal() as db:
+        job = await db.get(BulkJob, job_id)
+        if not job:
+            return False
+        if runner_id is not None and job.runner_id not in {None, runner_id}:
+            return False
+        now = utcnow()
+        job.heartbeat_at = now
+        job.updated_at = now
+        if runner_id is not None:
+            job.runner_id = runner_id
+        if checkpoint is not None:
+            job.checkpoint = _sanitize(checkpoint)
+        await db.commit()
+        return True
+
+
+async def fail_job(job_id: str, code: str, detail: str) -> bool:
+    async with AsyncSessionLocal() as db:
+        job = await db.get(BulkJob, job_id)
+        if not job:
+            return False
+        now = utcnow()
+        job.status = "failed"
+        job.last_error_code = (code or "JobError")[:128]
+        job.last_error_detail = (detail or "")[:2000] or None
+        job.finished_at = now
+        job.heartbeat_at = now
+        job.updated_at = now
+        job.runner_id = None
+        await db.commit()
+        return True
 
 
 async def is_cancelled(job_id: str) -> bool:
@@ -193,7 +274,7 @@ async def recover_interrupted_jobs(stale_after_seconds: int = 180) -> int:
     async with AsyncSessionLocal() as db:
         res = await db.execute(select(BulkJob).where(
             BulkJob.status.in_(["queued", "running", "cancelling"]),
-            BulkJob.type != "phone_check",
+            BulkJob.type.notin_(RESUMABLE_JOB_TYPES),
             or_(
                 BulkJob.heartbeat_at < cutoff,
                 and_(BulkJob.heartbeat_at.is_(None), BulkJob.started_at < cutoff),
@@ -205,6 +286,10 @@ async def recover_interrupted_jobs(stale_after_seconds: int = 180) -> int:
             job.status = "interrupted"
             job.finished_at = now
             job.heartbeat_at = now
+            job.updated_at = now
+            job.runner_id = None
+            job.last_error_code = "WORKER_INTERRUPTED"
+            job.last_error_detail = "Worker dừng hoặc heartbeat quá hạn trước khi tác vụ hoàn tất."
         if jobs:
             await db.commit()
         return len(jobs)
