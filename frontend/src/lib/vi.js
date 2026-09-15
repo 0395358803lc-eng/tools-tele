@@ -13,6 +13,8 @@ export const JOB_STATUS_VI = {
   queued: 'Đang xếp hàng', running: 'Đang chạy', cancelling: 'Đang hủy',
   completed: 'Hoàn tất', completed_with_errors: 'Hoàn tất có lỗi', failed: 'Thất bại',
   cancelled: 'Đã hủy', interrupted: 'Bị gián đoạn', paused: 'Đã tạm dừng', pending: 'Đang chờ', skipped: 'Bỏ qua', ok: 'Thành công',
+  processing: 'Đang xử lý', rate_limited: 'Đang chờ FloodWait', in_flight_unknown: 'Trạng thái chưa xác định',
+  retry_required: 'Cần thử lại', temporary_error: 'Lỗi tạm thời', found: 'Đã tìm thấy', not_discoverable: 'Không thể tra cứu', invalid: 'Không hợp lệ', permanent_error: 'Lỗi vĩnh viễn',
 }
 
 export const JOB_TYPE_VI = {

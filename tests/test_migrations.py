@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import sqlite3
@@ -30,7 +30,7 @@ class MigrationTests(unittest.TestCase):
             db = sqlite3.connect(db_path)
             try:
                 revision = db.execute('select version_num from alembic_version').fetchone()[0]
-                self.assertEqual(revision, '1a2b3c4d5e6f')
+                self.assertEqual(revision, '7f3a9c2d1e4b')
                 for table, col in [
                     ('accounts', 'tg_user_id'),
                     ('gone_accounts', 'tg_user_id'),

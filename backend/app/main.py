@@ -17,6 +17,7 @@ from .tg_manager import manager
 from .runtime_settings import load_runtime_settings
 from .job_store import recover_interrupted_jobs
 from .phone_check_runner import phone_check_runner
+from .message_dispatch_runner import message_dispatch_runner
 from . import secrets_store
 from .auth import router as auth_router, require_auth, cleanup_auth_state
 from .security_middleware import BrowserSecurityMiddleware
@@ -51,6 +52,7 @@ async def lifespan(app: FastAPI):
         manager.set_loop(asyncio.get_event_loop())
         await manager.startup_load_all()
         await phone_check_runner.start()
+        await message_dispatch_runner.start()
 
         async def status_loop():
             while True:
@@ -70,6 +72,7 @@ async def lifespan(app: FastAPI):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        await message_dispatch_runner.stop()
         await phone_check_runner.stop()
         await manager.shutdown()
         await release_instance_lock()

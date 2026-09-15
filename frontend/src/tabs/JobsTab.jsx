@@ -4,8 +4,18 @@ import { fmtTime } from '../lib/util'
 import { jobStatusVi, jobTypeVi } from '../lib/vi'
 import { useToast } from '../lib/toast.jsx'
 
-const ACTIVE = new Set(['queued', 'running', 'cancelling'])
+const ACTIVE = new Set(['queued', 'running', 'paused', 'cancelling'])
 const RETRY_ITEMS = new Set(['failed', 'pending', 'queued', 'running'])
+
+function waitSeconds(value) {
+  if (!value) return 0
+  return Math.max(0, Math.ceil((new Date(value).getTime() - Date.now()) / 1000))
+}
+
+function processedOf(job) {
+  if (job?.resumable) return Math.max(0, Number(job.total || 0) - Number(job.pending || 0))
+  return Number(job.success || 0) + Number(job.failed || 0) + Number(job.skipped || 0) + Number(job.pending || 0)
+}
 
 function statusClass(status) {
   if (status === 'completed') return 'bg-brand-ok'
@@ -40,6 +50,18 @@ export default function JobsTab() {
 
   async function openJob(id) {
     try { setSelected(await Endpoints.job(id)) } catch (e) { toast.error(e.message) }
+  }
+
+  async function pause(id) {
+    setBusy(true)
+    try { await Endpoints.pauseJob(id); toast.info('Đã tạm dừng tác vụ tại checkpoint an toàn'); await load() }
+    catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+
+  async function resume(id) {
+    setBusy(true)
+    try { await Endpoints.resumeJob(id); toast.success('Đã đưa tác vụ trở lại hàng đợi để tiếp tục'); await load() }
+    catch (e) { toast.error(e.message) } finally { setBusy(false) }
   }
 
   async function cancel(id) {
@@ -110,9 +132,13 @@ export default function JobsTab() {
                 <tr key={j.id} className="border-b border-zinc-300 dark:border-zinc-700">
                   <td className="p-2"><button className="font-bold hover:underline" onClick={() => openJob(j.id)}>{jobTypeVi(j.type)}</button><div className="font-mono text-[9px] opacity-50">{j.id}</div></td>
                   <td className="p-2"><span className={'nb-badge text-black ' + statusClass(j.status)}>{jobStatusVi(j.status)}</span></td>
-                  <td className="p-2 font-mono text-xs">{j.success + j.failed + j.skipped + j.pending}/{j.total} · ✓{j.success} · ✕{j.failed} · ⧗{j.pending}</td>
+                  <td className="p-2 font-mono text-xs">{processedOf(j)}/{j.total} · ✓{j.success} · ✕{j.failed} · ⧗{j.pending}</td>
                   <td className="p-2 text-xs">{fmtTime(j.created_at)}</td>
-                  <td className="p-2 text-right">{ACTIVE.has(j.status) && <button className="nb-btn-err !py-1 !px-2 text-xs" disabled={busy} onClick={() => cancel(j.id)}>Hủy</button>}</td>
+                  <td className="p-2 text-right"><div className="flex justify-end gap-1">
+                    {j.resumable && ['queued', 'running'].includes(j.status) && <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => pause(j.id)}>Tạm dừng</button>}
+                    {j.resumable && j.status === 'paused' && <button className="nb-btn-pri !py-1 !px-2 text-xs" disabled={busy} onClick={() => resume(j.id)}>Tiếp tục</button>}
+                    {ACTIVE.has(j.status) && <button className="nb-btn-err !py-1 !px-2 text-xs" disabled={busy} onClick={() => cancel(j.id)}>Hủy</button>}
+                  </div></td>
                 </tr>
               ))}
             </tbody>
@@ -131,6 +157,12 @@ export default function JobsTab() {
               <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => retry(selected.id)}>Chạy lại mục lỗi/đang chờ</button>
             )}
             <button className="nb-btn !py-1 !px-2" onClick={() => setSelected(null)}>✕</button>
+          </div>
+          <div className="flex flex-wrap gap-2 mb-3 text-[11px]">
+            {selected.heartbeat_at && <span className="nb-badge bg-white text-black">Heartbeat {fmtTime(selected.heartbeat_at)}</span>}
+            <span className="nb-badge bg-white text-black">Checkpoint {processedOf(selected)}/{selected.total}</span>
+            {selected.resume_count > 0 && <span className="nb-badge bg-white text-black">Đã tiếp tục {selected.resume_count} lần</span>}
+            {selected.paused_at && <span className="nb-badge bg-brand-warn text-black">Tạm dừng từ {fmtTime(selected.paused_at)}</span>}
           </div>
           {selected.delivery && (
             <div className="flex flex-wrap gap-2 mb-3 text-xs">
@@ -157,6 +189,8 @@ export default function JobsTab() {
                 <span className="font-mono">Tài khoản #{item.account_id ?? 'đã xóa'}</span>
                 {item.target && <span className="font-mono font-bold truncate max-w-[35%]" title={item.target}>→ {item.target}</span>}
                 <span className="opacity-60">lần thử {item.attempts}</span>
+                {item.status === 'rate_limited' && item.next_retry_at && <span className="nb-badge bg-brand-warn text-black">FloodWait ~{waitSeconds(item.next_retry_at)}s</span>}
+                {item.status === 'in_flight_unknown' && <span className="nb-badge bg-brand-warn text-black">Không tự retry để tránh trùng</span>}
                 {item.error_detail && <span className="ml-auto opacity-70 truncate max-w-[55%]" title={item.error_detail}>{item.error_detail}</span>}
               </div>
             ))}
