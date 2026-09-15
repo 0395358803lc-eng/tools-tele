@@ -12,6 +12,7 @@ from ..quota import assert_daily_messages
 from ..schemas import ChatSendIn
 from ..tg_manager import SERVICE_ID, manager
 from ..utils import friendly_error
+from ..realtime_events import emit_event
 from .messaging import _coerce_peer, _history, _msg_to_dict, _peer_info
 
 router = APIRouter(prefix="/api/inbox", tags=["inbox"])
@@ -132,6 +133,7 @@ async def inbox_mark_read(account_id: int, body: InboxPeerIn):
         entity = await _resolve_entity(cli, body.peer)
         await asyncio.wait_for(cli.send_read_acknowledge(entity, clear_mentions=True), timeout=30)
         await log_audit("inbox:mark_read", account_id, {"peer": body.peer})
+        await emit_event("inbox", "success", "marked_read", "Đã đánh dấu hội thoại là đã đọc", account_id=account_id, metadata={"peer": body.peer})
         return {"ok": True}
     except FloodWaitError as exc:
         await manager.mark_flood_wait(account_id, exc.seconds)
@@ -155,6 +157,7 @@ async def inbox_mark_all_read(account_id: int):
             await asyncio.wait_for(cli.send_read_acknowledge(entity, clear_mentions=True), timeout=30)
             marked += 1
         await log_audit("inbox:mark_all_read", account_id, {"dialogs": marked})
+        await emit_event("inbox", "success", "marked_all_read", f"Đã đánh dấu {marked} hội thoại là đã đọc", account_id=account_id, metadata={"dialogs": marked})
         return {"ok": True, "dialogs": marked}
     except FloodWaitError as exc:
         await manager.mark_flood_wait(account_id, exc.seconds)
@@ -172,18 +175,23 @@ async def inbox_reply(account_id: int, body: ChatSendIn):
     if not text:
         raise HTTPException(400, "Tin nhắn đang trống")
     try:
+        await emit_event("inbox", "info", "reply_started", "Bắt đầu gửi trả lời", account_id=account_id, metadata={"peer": body.peer})
         async with manager.account_operation(account_id, "inbox_reply"):
             entity = await _resolve_entity(cli, body.peer)
             sent = await asyncio.wait_for(cli.send_message(entity, text), timeout=45)
         await manager.mark_operation_success(account_id)
         await log_audit("inbox:reply", account_id, {"peer": body.peer})
+        await emit_event("inbox", "success", "reply_sent", "Đã gửi trả lời", account_id=account_id, metadata={"peer": body.peer, "message_id": getattr(sent, "id", None)})
         return {"ok": True, "message": _msg_to_dict(sent)}
     except FloodWaitError as exc:
         await manager.mark_flood_wait(account_id, exc.seconds)
+        await emit_event("inbox", "warning", "reply_flood_wait", f"Trả lời bị FloodWait {exc.seconds}s", account_id=account_id, metadata={"retry_after_seconds": int(exc.seconds)})
         raise HTTPException(429, friendly_error(exc))
     except asyncio.TimeoutError as exc:
         await manager.mark_operation_error(account_id, exc)
+        await emit_event("inbox", "warning", "reply_unknown", "Hết thời gian chờ khi gửi trả lời; trạng thái gửi chưa xác định", account_id=account_id, metadata={"error_type": "TimeoutError"})
         raise HTTPException(504, "Hết thời gian chờ Telegram; hãy kiểm tra lịch sử trước khi gửi lại để tránh trùng tin.")
     except Exception as exc:
         await manager.mark_operation_error(account_id, exc)
+        await emit_event("inbox", "error", "reply_failed", "Gửi trả lời thất bại", account_id=account_id, metadata={"error_type": type(exc).__name__})
         raise HTTPException(400, friendly_error(exc))

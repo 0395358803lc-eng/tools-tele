@@ -33,6 +33,7 @@ from ..utils import friendly_error, bulk_stream, BulkPacer, read_upload_limited
 from ..config import settings
 from ..audit import log_audit
 from ..runtime_settings import bulk_limits
+from ..realtime_events import emit_event
 from ..quota import assert_daily_messages, assert_job_capacity
 from ..message_dispatch import (
     eligible_message_accounts, multi_target_message_stream, normalize_message_target, normalize_message_targets,
@@ -163,6 +164,7 @@ async def import_message_targets(
         "count": len(targets), "rows": parsed["rows"], "columns": parsed["columns"],
         "duplicates": duplicate_count, "invalid_count": invalid_count,
     })
+    await emit_event("import", "success", "message_targets", "Đã nhập danh sách người nhận", metadata={"filename": filename, "count": len(targets), "rows": parsed["rows"], "columns": parsed["columns"], "duplicates": duplicate_count, "invalid_count": invalid_count})
     return {
         "filename": filename, "targets": targets, "count": len(targets),
         "rows": parsed["rows"], "columns": parsed["columns"],

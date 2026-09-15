@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from ..quota import assert_proxy_capacity
 from ..proxy_store import public_proxy, runtime_proxy_from_row, save_proxy, mark_proxy_status, set_active_slot, has_fallback, validate_proxy
 from ..tg_manager import manager
 from ..utils import friendly_error
+from ..realtime_events import emit_event
 
 router = APIRouter(prefix="/api/proxies", tags=["proxies"])
 
@@ -170,7 +172,11 @@ async def test_proxy_config(account_id: int, body: ProxyDraftTestIn, db: AsyncSe
     row = await db.get(AccountProxy, account_id)
     try:
         slot, cfg = _draft_proxy_config(row, body)
+        await emit_event("proxy", "info", "test_started", f"Bắt đầu kiểm tra proxy {slot}", account_id=account_id, metadata={"slot": slot, "proxy_type": cfg["proxy_type"]})
+        started = time.perf_counter()
         target = await _probe_proxy(account_id, cfg)
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
+        await emit_event("proxy", "success", "test_ok", f"Proxy {slot} hoạt động", account_id=account_id, metadata={"slot": slot, "proxy_type": cfg["proxy_type"], "latency_ms": latency_ms})
         await log_audit("proxy:test_config", account_id, {"result": "ok", "slot": slot, "proxy_type": cfg["proxy_type"]})
         return {"ok": True, "slot": slot, "target": target}
     except ValueError as exc:
@@ -179,6 +185,7 @@ async def test_proxy_config(account_id: int, body: ProxyDraftTestIn, db: AsyncSe
         await log_audit("proxy:test_config", account_id, {
             "result": "failed", "slot": (body.slot or "primary")[:16], "error_type": type(exc).__name__,
         })
+        await emit_event("proxy", "error", "test_failed", "Kiểm tra proxy thất bại", account_id=account_id, metadata={"slot": (body.slot or "primary")[:16], "error_type": type(exc).__name__})
         raise HTTPException(400, "Kiểm tra proxy trước khi lưu thất bại: " + friendly_error(exc))
 
 

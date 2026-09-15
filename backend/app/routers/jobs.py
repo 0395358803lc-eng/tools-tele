@@ -13,6 +13,7 @@ from ..db import get_db
 from ..models import Account, BulkJob, BulkJobItem, MessageDispatchItem, PhoneCheckItem
 from ..audit import log_audit, _sanitize
 from ..utils import bulk_stream, friendly_error
+from ..realtime_events import emit_event
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -159,6 +160,7 @@ async def export_job_csv(job_id: str, db: AsyncSession = Depends(get_db)):
     for item in detail.get("items", []):
         writer.writerow([_export_value(item.get(field)) for field in _EXPORT_FIELDS])
     data = output.getvalue().encode("utf-8-sig")
+    await emit_event("export", "success", "job_csv", "Đã tạo file CSV của tác vụ", job_id=job_id, metadata={"rows": len(detail.get("items", [])), "format": "csv"})
     return StreamingResponse(io.BytesIO(data), media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": f'attachment; filename="job-{job_id}.csv"'
     })
@@ -182,6 +184,7 @@ async def export_job_xlsx(job_id: str, db: AsyncSession = Depends(get_db)):
             summary.append([f"delivery.{key}", value])
     output = io.BytesIO()
     wb.save(output); output.seek(0)
+    await emit_event("export", "success", "job_xlsx", "Đã tạo file XLSX của tác vụ", job_id=job_id, metadata={"rows": len(detail.get("items", [])), "format": "xlsx"})
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={
         "Content-Disposition": f'attachment; filename="job-{job_id}.xlsx"'
     })

@@ -23,6 +23,7 @@ from ..quota import assert_daily_phone_checks, assert_job_capacity
 from ..tg_manager import manager
 from ..time_utils import utcnow
 from ..utils import read_upload_limited
+from ..realtime_events import emit_event
 
 router = APIRouter(prefix="/api/phone-checks", tags=["phone-checks"])
 ACTIVE_JOB_STATUSES = {"queued", "running", "paused", "cancelling"}
@@ -119,6 +120,7 @@ async def import_numbers(
         rows, summary = normalize_phone_list(phones, phone_region)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    await emit_event("import", "success", "phone_numbers", "Đã nhập danh sách số điện thoại", metadata={"filename": file.filename or "", "total": len(rows), "valid": summary["valid"], "invalid": summary["invalid"], "duplicates": summary["duplicates"]})
     return {"filename": file.filename, "summary": summary, "phones": [row["original"] for row in rows]}
 
 
@@ -242,6 +244,7 @@ async def create_phone_check_job(body: CreatePhoneCheckIn, db: AsyncSession = De
         "invalid": summary["invalid"],
         "duplicates": summary["duplicates"],
     })
+    await emit_event("phone_check", "info", "job_created", "Đã tạo tác vụ check số", job_id=job_id, progress={"processed": summary["invalid"], "total": len(rows)}, metadata={"accounts": len(active_accounts), "valid": summary["valid"], "invalid": summary["invalid"], "duplicates": summary["duplicates"]})
     return {"job_id": job_id, "summary": summary, "distribution": dict(assigned_counts)}
 
 
@@ -420,6 +423,7 @@ async def _export_rows(db: AsyncSession, job_id: str, status: str | None = None,
 async def export_phone_check_json(job_id: str, status: str | None = Query(None), q: str | None = Query(None, max_length=100), db: AsyncSession = Depends(get_db)):
     job, rows = await _export_rows(db, job_id, status, q)
     payload = json.dumps({"job": _job_dict(job), "results": [_item_dict(row) for row in rows]}, ensure_ascii=False, default=str)
+    await emit_event("export", "success", "phone_check_json", "Đã tạo file JSON kết quả check số", job_id=job_id, metadata={"rows": len(rows), "format": "json"})
     return StreamingResponse(io.BytesIO(payload.encode("utf-8")), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="phone-check-{job_id}.json"'})
 
 
@@ -434,6 +438,7 @@ async def export_phone_check_xlsx(job_id: str, status: str | None = Query(None),
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
+    await emit_event("export", "success", "phone_check_xlsx", "Đã tạo file XLSX kết quả check số", job_id=job_id, metadata={"rows": len(rows), "format": "xlsx"})
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -450,4 +455,5 @@ async def export_phone_check_csv(job_id: str, status: str | None = Query(None), 
     for row in rows:
         writer.writerow([row.original_phone, row.normalized_phone or "", row.status, row.account_id or "", row.telegram_user_id or "", row.username or "", row.first_name or "", row.last_name or "", row.presence or "", row.last_online_at or "", row.attempts, row.error_code or "", row.error_detail or ""])
     data = output.getvalue().encode("utf-8-sig")
+    await emit_event("export", "success", "phone_check_csv", "Đã tạo file CSV kết quả check số", job_id=job_id, metadata={"rows": len(rows), "format": "csv"})
     return StreamingResponse(io.BytesIO(data), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="phone-check-{job_id}.csv"'})

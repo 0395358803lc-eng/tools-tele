@@ -7,6 +7,7 @@ from .db import AsyncSessionLocal
 from .models import AccountProxy
 from .secrets_store import encrypt_value, decrypt_value
 from .time_utils import utcnow
+from .realtime_events import emit_event
 
 SUPPORTED_PROXY_TYPES = {"socks5", "socks4", "http"}
 
@@ -110,8 +111,12 @@ async def set_active_slot(account_id: int, slot: str, *, failover: bool = False)
             row.failover_count = int(row.failover_count or 0) + 1
             row.last_failover_at = utcnow()
         row.updated_at = utcnow()
+        owner_id = row.user_id
         await db.commit()
-        return True
+    if changed:
+        level = "warning" if slot == "fallback" else "success"
+        await emit_event("proxy", level, "slot_changed", f"Đã chuyển proxy sang {slot}", account_id=account_id, metadata={"slot": slot, "failover": bool(failover)}, user_id=owner_id)
+    return True
 
 
 async def save_proxy(
@@ -159,8 +164,13 @@ async def save_proxy(
 
 
 async def mark_proxy_status(account_id: int, status: str, error: str | None = None) -> None:
+    owner_id = None; previous = None
     async with AsyncSessionLocal() as db:
         row = await db.get(AccountProxy, account_id)
         if not row: return
+        owner_id, previous = row.user_id, row.last_status
         row.last_status=status[:32]; row.last_error=(error or '')[:1000] or None
         row.last_checked_at=utcnow(); await db.commit()
+    if previous != status:
+        level = "success" if status in {"connected", "test_ok", "failover_connected"} else "warning" if status in {"pending", "primary_failed"} else "error" if error or status.endswith("failed") else "info"
+        await emit_event("proxy", level, status, f"Proxy: {status}", account_id=account_id, metadata={"previous_status": previous, "status": status, "has_error": bool(error)}, user_id=owner_id)
