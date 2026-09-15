@@ -30,7 +30,7 @@ class MigrationTests(unittest.TestCase):
             db = sqlite3.connect(db_path)
             try:
                 revision = db.execute('select version_num from alembic_version').fetchone()[0]
-                self.assertEqual(revision, '7f3a9c2d1e4b')
+                self.assertEqual(revision, '8a4b5c6d7e8f')
                 for table, col in [
                     ('accounts', 'tg_user_id'),
                     ('gone_accounts', 'tg_user_id'),
@@ -51,6 +51,7 @@ class MigrationTests(unittest.TestCase):
                 self.assertIn('session_ciphertext', tg_session_cols)
                 self.assertIn('encrypted_secrets', tables)
                 self.assertIn('message_dispatch_items', tables)
+                self.assertIn('realtime_events', tables)
                 self.assertIn('account_proxies', tables)
                 proxy_cols = {r[1] for r in db.execute('pragma table_info(account_proxies)')}
                 for col in ('fallback_enabled', 'fallback_host', 'active_slot', 'failover_count', 'last_failover_at'):

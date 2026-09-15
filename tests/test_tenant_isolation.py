@@ -98,7 +98,11 @@ class TenantIsolationTests(unittest.TestCase):
         from app.models import TENANT_TABLE_NAMES
         ns={}
         exec(compile(source, '<rls-migration>', 'exec'), ns)
-        self.assertEqual(set(ns['TENANT_TABLES']), set(TENANT_TABLE_NAMES))
+        covered=set(ns['TENANT_TABLES'])
+        realtime=(BACKEND/'alembic'/'versions'/'8a4b5c6d7e8f_realtime_events.py').read_text(encoding='utf-8')
+        if 'tenant_owner_realtime_events' in realtime and 'ENABLE ROW LEVEL SECURITY' in realtime:
+            covered.add('realtime_events')
+        self.assertEqual(covered, set(TENANT_TABLE_NAMES))
 
     def test_runtime_settings_are_tenant_scoped(self):
         with tempfile.TemporaryDirectory(prefix='mtm_tenant_runtime_') as td:

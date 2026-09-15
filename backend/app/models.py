@@ -340,6 +340,30 @@ class AccountProxy(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class RealtimeEvent(Base):
+    __tablename__ = "realtime_events"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    __table_args__ = (
+        Index("ix_realtime_events_user_cursor", "user_id", "id"),
+        Index("ix_realtime_events_user_feature_cursor", "user_id", "feature", "id"),
+        Index("ix_realtime_events_user_job_cursor", "user_id", "job_id", "id"),
+        Index("ix_realtime_events_user_level_cursor", "user_id", "level", "id"),
+        Index("ix_realtime_events_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    feature: Mapped[str] = mapped_column(String(48))
+    level: Mapped[str] = mapped_column(String(16))
+    phase: Mapped[str] = mapped_column(String(64), default="event")
+    message: Mapped[str] = mapped_column(Text)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
@@ -386,6 +410,6 @@ class TargetCheckResult(Base):
 TENANT_MODELS = (
     Account, TelegramSession, SecurityMessage, GoneAccount, AppSetting, EncryptedSecret,
     AccountStatusHistory, BulkJob, BulkJobItem, MessageDispatchItem, PhoneCheckItem,
-    PhoneCheckAccount, AccountProxy, AuditLog, TargetCheck, TargetCheckResult,
+    PhoneCheckAccount, AccountProxy, RealtimeEvent, AuditLog, TargetCheck, TargetCheckResult,
 )
 TENANT_TABLE_NAMES = {model.__tablename__ for model in TENANT_MODELS}

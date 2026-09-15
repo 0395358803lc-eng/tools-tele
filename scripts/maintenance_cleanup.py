@@ -23,7 +23,7 @@ from app.config import settings
 from app.db import AsyncSessionLocal
 from app.models import (
     AccountStatusHistory, AppSession, AuditLog, BulkJob, LoginAttempt,
-    SecurityMessage, TargetCheck,
+    RealtimeEvent, SecurityMessage, TargetCheck,
 )
 from app.tenant import system_scope
 from app.time_utils import utcnow
@@ -46,6 +46,7 @@ async def cleanup(apply: bool) -> dict[str, int]:
     now = utcnow()
     cutoffs = {
         'audit_logs': now - timedelta(days=_days(settings.RETENTION_AUDIT_DAYS)),
+        'realtime_events': now - timedelta(days=_days(settings.RETENTION_EVENT_DAYS)),
         'account_status_history': now - timedelta(days=_days(settings.RETENTION_STATUS_DAYS)),
         'bulk_jobs': now - timedelta(days=_days(settings.RETENTION_JOBS_DAYS)),
         'security_messages': now - timedelta(days=_days(settings.RETENTION_SECURITY_DAYS)),
@@ -58,6 +59,7 @@ async def cleanup(apply: bool) -> dict[str, int]:
         async with AsyncSessionLocal() as db:
             specs = [
                 ('audit_logs', AuditLog, (AuditLog.created_at < cutoffs['audit_logs'],)),
+                ('realtime_events', RealtimeEvent, (RealtimeEvent.created_at < cutoffs['realtime_events'],)),
                 ('account_status_history', AccountStatusHistory, (AccountStatusHistory.created_at < cutoffs['account_status_history'],)),
                 ('security_messages', SecurityMessage, (SecurityMessage.received_at < cutoffs['security_messages'],)),
                 ('target_checks', TargetCheck, (TargetCheck.created_at < cutoffs['target_checks'],)),
