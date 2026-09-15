@@ -5,6 +5,7 @@ const BASE = ''  // proxied by vite
 // listeners notified when any request returns 401
 const _onUnauth = new Set()
 export function onUnauthorized(cb) { _onUnauth.add(cb); return () => _onUnauth.delete(cb) }
+export function notifyUnauthorized() { _onUnauth.forEach((fn) => { try { fn() } catch {} }) }
 
 async function request(method, path, { json, form, query, silent } = {}) {
   let url = path
@@ -36,7 +37,7 @@ async function request(method, path, { json, form, query, silent } = {}) {
   let body = null
   try { body = await r.json() } catch { /* may not be json */ }
   if (r.status === 401 && !path.startsWith('/api/auth-app/')) {
-    _onUnauth.forEach((fn) => { try { fn() } catch {} })
+    notifyUnauthorized()
   }
   if (!r.ok) {
     const msg = body?.detail || body?.message || `${r.status} ${r.statusText}`
@@ -70,7 +71,7 @@ async function streamRequest(path, init, onEvent) {
   } catch {
     const e = new Error('Không thể kết nối tới máy chủ'); e.status = 0; e.network = true; throw e
   }
-  if (r.status === 401) _onUnauth.forEach((fn) => { try { fn() } catch {} })
+  if (r.status === 401) notifyUnauthorized()
   if (!r.ok || !r.body) {
     let detail = `${r.status} ${r.statusText}`
     try { const b = await r.json(); detail = b?.detail || detail } catch { /* not json */ }
@@ -125,7 +126,7 @@ export async function downloadFile(path, filename) {
   } catch {
     const e = new Error('Không thể kết nối tới máy chủ'); e.status = 0; throw e
   }
-  if (r.status === 401) _onUnauth.forEach((fn) => { try { fn() } catch {} })
+  if (r.status === 401) notifyUnauthorized()
   if (!r.ok) {
     let detail = `${r.status} ${r.statusText}`
     try { const b = await r.json(); detail = b?.detail || detail } catch {}
@@ -274,6 +275,7 @@ export const Endpoints = {
   view: (ids, post_link, onEvent) => streamNDJSON('/api/messaging/view', { account_ids: ids, post_link }, onEvent),
 
   audit: (limit = 100, action, account_id) => api.get('/api/audit', { limit, action, account_id }),
+  eventHistory: (params = {}) => api.get('/api/events/history', params),
 
   jobs: (limit = 50) => api.get('/api/jobs', { limit }),
   job: (id) => api.get(`/api/jobs/${id}`),
