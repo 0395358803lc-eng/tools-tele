@@ -64,18 +64,41 @@ def postgres_url(raw: str) -> str:
     raw = raw.replace('postgresql+asyncpg://', 'postgresql://', 1)
     return raw.replace('?ssl=', '?sslmode=').replace('&ssl=', '&sslmode=')
 
-def find_pg_tool(name: str) -> Path | None:
+def project_user_home(root: Path) -> Path | None:
+    resolved = root.resolve()
+    for item in (resolved, *resolved.parents):
+        if item.parent.name.lower() == 'users':
+            return item
+    return None
+
+
+def find_pg_tool(name: str, root: Path | None = None) -> Path | None:
     found = shutil.which(name)
     if found:
         return Path(found)
     exe = name + ('.exe' if os.name == 'nt' else '')
-    candidates = [
-        Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'pgAdmin 4' / 'runtime' / exe,
-        Path(os.environ.get('ProgramFiles', '')) / 'pgAdmin 4' / 'runtime' / exe,
-    ]
-    base = Path(os.environ.get('ProgramFiles', '')) / 'PostgreSQL'
-    if base.exists():
-        candidates.extend(sorted(base.glob(f'*/bin/{exe}'), reverse=True))
+    candidates: list[Path] = []
+    pg_bin = (os.environ.get('PG_BIN_DIR') or '').strip()
+    if pg_bin:
+        candidates.append(Path(pg_bin) / exe)
+    local_appdata = (os.environ.get('LOCALAPPDATA') or '').strip()
+    if local_appdata:
+        candidates.append(Path(local_appdata) / 'Programs' / 'pgAdmin 4' / 'runtime' / exe)
+    if root is not None:
+        home = project_user_home(root)
+        if home is not None:
+            candidates.append(home / 'AppData' / 'Local' / 'Programs' / 'pgAdmin 4' / 'runtime' / exe)
+    program_files = (os.environ.get('ProgramFiles') or '').strip()
+    if program_files:
+        candidates.append(Path(program_files) / 'pgAdmin 4' / 'runtime' / exe)
+        base = Path(program_files) / 'PostgreSQL'
+        if base.exists():
+            candidates.extend(sorted(base.glob(f'*/bin/{exe}'), reverse=True))
+    system_drive = (os.environ.get('SystemDrive') or '').strip()
+    if os.name == 'nt' and system_drive:
+        users = Path(system_drive + '\\') / 'Users'
+        if users.exists():
+            candidates.extend(sorted(users.glob(f'*/AppData/Local/Programs/pgAdmin 4/runtime/{exe}')))
     return next((item for item in candidates if item.is_file()), None)
 
 def pg_connection(raw: str) -> tuple[list[str], dict[str, str]]:
@@ -127,8 +150,8 @@ def main() -> None:
         if db_url.startswith(('postgres://', 'postgresql://', 'postgresql+asyncpg://')):
             db_type = 'postgresql'
             dump = stage / 'database.pgcustom'
-            pg_dump = find_pg_tool('pg_dump')
-            pg_restore = find_pg_tool('pg_restore')
+            pg_dump = find_pg_tool('pg_dump', root)
+            pg_restore = find_pg_tool('pg_restore', root)
             if not pg_dump or not pg_restore:
                 raise SystemExit('Cần pg_dump và pg_restore để backup PostgreSQL')
             conn_args, pg_env = pg_connection(db_url)

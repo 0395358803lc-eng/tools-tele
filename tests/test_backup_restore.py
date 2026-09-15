@@ -6,7 +6,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
+
+from scripts import backup_runtime as br
+from scripts import restore_runtime as rr
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT.parents[1]
@@ -51,6 +55,22 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertIn('test-only', (dst / 'backend' / '.env').read_text(encoding='utf-8'))
             if os.name != 'nt':
                 self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
+
+
+    def test_pg_tool_discovery_uses_project_user_home(self):
+        with tempfile.TemporaryDirectory(prefix='mtm_pg_tool_') as td:
+            base = Path(td)
+            project = base / 'Users' / 'Admin' / 'Downloads' / 'tools-tele'
+            runtime = base / 'Users' / 'Admin' / 'AppData' / 'Local' / 'Programs' / 'pgAdmin 4' / 'runtime'
+            project.mkdir(parents=True)
+            runtime.mkdir(parents=True)
+            exe = 'pg_dump.exe' if os.name == 'nt' else 'pg_dump'
+            tool = runtime / exe
+            tool.write_bytes(b'test')
+            with mock.patch.object(br.shutil, 'which', return_value=None), \
+                 mock.patch.dict(os.environ, {'LOCALAPPDATA': '', 'ProgramFiles': '', 'SystemDrive': ''}, clear=False):
+                self.assertTrue(br.find_pg_tool('pg_dump', project).samefile(tool))
+                self.assertTrue(rr.find_pg_tool('pg_dump', project).samefile(tool))
 
     def test_nested_tenant_session_and_encryption_key_round_trip(self):
         with tempfile.TemporaryDirectory(prefix='mtm_nested_backup_') as td:
