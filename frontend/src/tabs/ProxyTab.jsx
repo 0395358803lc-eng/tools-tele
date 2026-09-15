@@ -108,20 +108,36 @@ export default function ProxyTab() {
     } catch (e) { toast.error(e.message) }
   }
 
+  function proxyPayload(extra = {}) {
+    const payload = { ...form, host: form.host.trim(), username: form.username.trim() || null, fallback_host: form.fallback_host.trim(), fallback_username: form.fallback_username.trim() || null, ...extra }
+    if (!payload.password) payload.password = null
+    if (!payload.fallback_password) payload.fallback_password = null
+    return payload
+  }
+
   async function save() {
     if (!selectedId) return null
     if (!form.host.trim()) { toast.error('Host proxy đang trống'); return null }
     setBusy('save')
     try {
-      const payload = { ...form, host: form.host.trim(), username: form.username.trim() || null, fallback_host: form.fallback_host.trim(), fallback_username: form.fallback_username.trim() || null }
-      if (!payload.password) payload.password = null
-      if (!payload.fallback_password) payload.fallback_password = null
-      const saved = await Endpoints.saveProxy(selectedId, payload)
+      const saved = await Endpoints.saveProxy(selectedId, proxyPayload())
       setForm(fillForm(saved))
       await refresh(selectedId)
       toast.success('Đã lưu proxy cho session')
       return saved
     } catch (e) { toast.error(e.message); return null } finally { setBusy('') }
+  }
+
+  async function testDraft(slot) {
+    if (!selectedId) return
+    if (slot === 'primary' && !form.host.trim()) { toast.error('Host proxy chính đang trống'); return }
+    if (slot === 'fallback' && (!form.fallback_enabled || !form.fallback_host.trim())) { toast.error('Proxy dự phòng chưa đủ cấu hình'); return }
+    const key = slot === 'fallback' ? 'draft-fallback' : 'draft-primary'
+    setBusy(key)
+    try {
+      await Endpoints.testProxyConfig(selectedId, proxyPayload({ slot }))
+      toast.success(slot === 'fallback' ? 'Biểu mẫu proxy dự phòng kết nối được — chưa lưu' : 'Biểu mẫu proxy chính kết nối được — chưa lưu')
+    } catch (e) { toast.error(e.message) } finally { setBusy('') }
   }
 
   async function testProxy() {
@@ -288,8 +304,10 @@ export default function ProxyTab() {
 
             <div className="flex flex-wrap gap-2 mt-5">
               <button className="nb-btn" disabled={!!busy} onClick={save}>{busy === 'save' ? 'Đang lưu…' : 'Lưu cấu hình'}</button>
-              <button className="nb-btn" disabled={!!busy || !selected.proxy} onClick={testProxy}>{busy === 'test' ? 'Đang kiểm tra…' : 'Kiểm tra proxy chính'}</button>
-              <button className="nb-btn" disabled={!!busy || !selected.proxy?.fallback?.ready} onClick={testFallback}>{busy === 'test-fallback' ? 'Đang kiểm tra…' : 'Kiểm tra dự phòng'}</button>
+              <button className="nb-btn" disabled={!!busy || !form.host.trim()} onClick={() => testDraft('primary')}>{busy === 'draft-primary' ? 'Đang kiểm tra…' : 'Test biểu mẫu chính'}</button>
+              <button className="nb-btn" disabled={!!busy || !form.fallback_enabled || !form.fallback_host.trim()} onClick={() => testDraft('fallback')}>{busy === 'draft-fallback' ? 'Đang kiểm tra…' : 'Test biểu mẫu dự phòng'}</button>
+              <button className="nb-btn" disabled={!!busy || !selected.proxy} onClick={testProxy}>{busy === 'test' ? 'Đang kiểm tra…' : 'Test proxy đã lưu'}</button>
+              <button className="nb-btn" disabled={!!busy || !selected.proxy?.fallback?.ready} onClick={testFallback}>{busy === 'test-fallback' ? 'Đang kiểm tra…' : 'Test dự phòng đã lưu'}</button>
               <button className="nb-btn-pri" disabled={!!busy} onClick={saveAndApply}>{busy === 'apply' ? 'Đang reconnect…' : 'Lưu & áp dụng'}</button>
               {selected.proxy?.fallback?.ready && selected.proxy?.active_slot !== 'fallback' && <button className="nb-btn" disabled={!!busy} onClick={() => switchSlot('fallback')}>Chuyển dự phòng</button>}
               {selected.proxy?.active_slot === 'fallback' && <button className="nb-btn" disabled={!!busy} onClick={() => switchSlot('primary')}>Về proxy chính</button>}
@@ -299,6 +317,7 @@ export default function ProxyTab() {
 
           <div className="nb-card p-4 text-xs opacity-75 space-y-1">
             <div><b>Cách hoạt động:</b> proxy chỉ gắn với session đang chọn, không ảnh hưởng session khác.</div>
+            <div>Nút “Test biểu mẫu” kiểm tra trực tiếp dữ liệu đang nhập mà không lưu vào cơ sở dữ liệu; nếu để trống mật khẩu đã lưu, hệ thống dùng mật khẩu mã hóa hiện có để kiểm tra.</div>
             <div>Khi bật proxy, lần kết nối/reconnect tiếp theo của Telethon bắt buộc đi qua proxy. Nếu proxy chính lỗi mạng/kết nối, hệ thống chỉ chuyển sang proxy dự phòng đã cấu hình; không tự chuyển sang IP trực tiếp và không dùng failover để né FloodWait.</div>
             <div>SOCKS5 được khuyến nghị. HTTP phải hỗ trợ phương thức CONNECT; HTTP proxy chỉ hỗ trợ web thông thường có thể không dùng được với Telegram.</div>
           </div>

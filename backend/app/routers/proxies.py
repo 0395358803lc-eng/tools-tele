@@ -13,7 +13,7 @@ from ..audit import log_audit
 from ..db import get_db
 from ..models import Account, AccountProxy
 from ..quota import assert_proxy_capacity
-from ..proxy_store import public_proxy, runtime_proxy_from_row, save_proxy, mark_proxy_status, set_active_slot, has_fallback
+from ..proxy_store import public_proxy, runtime_proxy_from_row, save_proxy, mark_proxy_status, set_active_slot, has_fallback, validate_proxy
 from ..tg_manager import manager
 from ..utils import friendly_error
 
@@ -37,6 +37,46 @@ class ProxyUpdateIn(BaseModel):
     fallback_password: str | None = Field(default=None, max_length=512)
     clear_fallback_password: bool = False
     fallback_rdns: bool = True
+
+
+class ProxyDraftTestIn(ProxyUpdateIn):
+    slot: str = "primary"
+
+
+def _draft_proxy_config(row: AccountProxy | None, body: ProxyDraftTestIn) -> tuple[str, dict]:
+    slot = (body.slot or "primary").strip().lower()
+    if slot not in {"primary", "fallback"}:
+        raise ValueError("slot phải là primary hoặc fallback")
+    current = runtime_proxy_from_row(row, slot) if row else None
+    if slot == "fallback":
+        ptype, host, port = validate_proxy(body.fallback_proxy_type, body.fallback_host, body.fallback_port)
+        password = None if body.clear_fallback_password else (body.fallback_password or (current or {}).get("password"))
+        return slot, {
+            "proxy_type": ptype, "addr": host, "port": port, "rdns": bool(body.fallback_rdns),
+            "username": (body.fallback_username or "").strip() or None, "password": password,
+        }
+    ptype, host, port = validate_proxy(body.proxy_type, body.host, body.port)
+    password = None if body.clear_password else (body.password or (current or {}).get("password"))
+    return slot, {
+        "proxy_type": ptype, "addr": host, "port": port, "rdns": bool(body.rdns),
+        "username": (body.username or "").strip() or None, "password": password,
+    }
+
+
+async def _probe_proxy(account_id: int, cfg: dict) -> str:
+    cli = manager.get(account_id)
+    target_host = getattr(getattr(cli, "session", None), "server_address", None) or "149.154.167.51"
+    target_port = int(getattr(getattr(cli, "session", None), "port", None) or 443)
+    proxy = Proxy.create(
+        _python_socks_type(cfg["proxy_type"]), cfg["addr"], cfg["port"],
+        cfg.get("username"), cfg.get("password"), cfg.get("rdns", True),
+    )
+    sock = await proxy.connect(dest_host=target_host, dest_port=target_port, timeout=12)
+    try:
+        sock.close()
+    except Exception:
+        pass
+    return f"{target_host}:{target_port}"
 
 
 async def _account_or_404(db: AsyncSession, account_id: int) -> Account:
@@ -122,6 +162,24 @@ def _python_socks_type(kind: str):
         "socks4": ProxyType.SOCKS4,
         "http": ProxyType.HTTP,
     }[kind]
+
+
+@router.post("/{account_id}/test-config")
+async def test_proxy_config(account_id: int, body: ProxyDraftTestIn, db: AsyncSession = Depends(get_db)):
+    await _account_or_404(db, account_id)
+    row = await db.get(AccountProxy, account_id)
+    try:
+        slot, cfg = _draft_proxy_config(row, body)
+        target = await _probe_proxy(account_id, cfg)
+        await log_audit("proxy:test_config", account_id, {"result": "ok", "slot": slot, "proxy_type": cfg["proxy_type"]})
+        return {"ok": True, "slot": slot, "target": target}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        await log_audit("proxy:test_config", account_id, {
+            "result": "failed", "slot": (body.slot or "primary")[:16], "error_type": type(exc).__name__,
+        })
+        raise HTTPException(400, "Kiểm tra proxy trước khi lưu thất bại: " + friendly_error(exc))
 
 
 @router.post("/{account_id}/test")
