@@ -485,7 +485,7 @@ class TgClientManager:
     async def startup_load_all(self):
         """On boot, start clients for every previously-authorized account."""
         async with AsyncSessionLocal() as db:
-            res = await db.execute(select(Account).where(Account.deleted_at.is_(None), Account.status.notin_(["banned", "deactivated"])))
+            res = await db.execute(select(Account).where(Account.deleted_at.is_(None), Account.status.notin_(["banned", "deactivated", "auth_required"])))
             accounts = res.scalars().all()
         conc = max(1, getattr(settings, "STARTUP_CONCURRENCY", 10))
         sem = asyncio.Semaphore(conc)
@@ -630,6 +630,12 @@ class TgClientManager:
                     except Exception:
                         pass
                     info = classify_error(exc)
+                    if info.category == "authentication" and info.code in {
+                        "AuthKeyDuplicatedError", "SessionRevokedError", "SessionExpiredError",
+                    }:
+                        await self.mark_operation_error(acc.id, exc)
+                        await telegram_session_store.clear(acc.id, acc.user_id)
+                        raise
                     proxy_failure = bool(account_proxy) and (
                         (info.retryable and info.category != "flood_wait") or "proxy" in type(exc).__name__.lower()
                         or "socks" in type(exc).__name__.lower()
@@ -1321,6 +1327,15 @@ class TgClientManager:
                     await telegram_session_store.clear(aid)
                 except Exception as exc:
                     info = classify_error(exc)
+                    if info.category == "authentication" and info.code in {
+                        "AuthKeyUnregisteredError", "AuthKeyDuplicatedError",
+                        "SessionRevokedError", "SessionExpiredError",
+                    }:
+                        self._clear_reconnect_backoff(aid)
+                        await self.mark_operation_error(aid, exc)
+                        await self.stop_client(aid, persist_session=False)
+                        await telegram_session_store.clear(aid)
+                        return
                     owner_id = self._owners.get(aid)
                     if info.category == "network" and owner_id:
                         with tenant_scope(owner_id):
