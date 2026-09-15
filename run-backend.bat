@@ -9,9 +9,16 @@ if not errorlevel 1 exit /b 0
 
 cd /d "%ROOT%"
 if not exist "%PY%" exit /b 10
-"%PY%" "%ROOT%scripts\production_check.py" --strict --check-db
-if errorlevel 1 exit /b 11
+rem Cold boot may precede network/PostgreSQL readiness. Keep the SYSTEM boot task alive while dependencies come up.
+for /l %%i in (1,1,90) do (
+  if exist "%ROOT%.maintenance" exit /b 0
+  "%PY%" "%ROOT%scripts\production_check.py" --strict --check-db
+  if not errorlevel 1 goto preflight_ok
+  %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 2"
+)
+exit /b 11
 
+:preflight_ok
 cd /d "%ROOT%backend"
 "%PY%" -m alembic upgrade head
 if errorlevel 1 exit /b 12

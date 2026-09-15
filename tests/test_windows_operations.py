@@ -95,6 +95,15 @@ class WindowsOperationsTests(unittest.TestCase):
         self.assertIn("AllowStartIfOnBatteries", src)
         self.assertIn("runtime", src)
 
+    def test_backend_launcher_waits_for_boot_dependencies(self):
+        src = (ROOT / "run-backend.bat").read_text(encoding="utf-8")
+        self.assertIn("for /l %%i in (1,1,90)", src)
+        self.assertIn("production_check.py", src)
+        self.assertIn("--strict --check-db", src)
+        self.assertIn("Start-Sleep -Seconds 2", src)
+        self.assertIn(":preflight_ok", src)
+        self.assertIn(".maintenance", src)
+
     def test_ngrok_launcher_waits_for_backend_and_uses_runtime_config(self):
         src = (ROOT / "run-ngrok.bat").read_text(encoding="utf-8")
         self.assertIn("runtime\\ngrok\\ngrok.exe", src)
