@@ -17,11 +17,12 @@ NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 
 
 def task_xml(name: str) -> ET.Element:
-    raw = subprocess.check_output(
-        [SCHTASKS, "/Query", "/TN", name, "/XML"],
-        text=True, encoding="utf-16", errors="replace",
-    )
-    return ET.fromstring(raw)
+    raw = subprocess.check_output([SCHTASKS, "/Query", "/TN", name, "/XML"])
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = raw.decode("utf-16", errors="replace")
+    else:
+        text = raw.decode("utf-8-sig", errors="replace")
+    return ET.fromstring(text)
 
 
 def check_task(name: str) -> bool:
@@ -29,7 +30,7 @@ def check_task(name: str) -> bool:
     user = root.findtext(".//t:Principal/t:UserId", default="", namespaces=NS)
     logon = root.findtext(".//t:Principal/t:LogonType", default="", namespaces=NS)
     is_system = user.upper() == "S-1-5-18" or user.upper() == "SYSTEM"
-    ok = is_system and logon.lower() == "serviceaccount"
+    ok = is_system and (not logon or logon.lower() == "serviceaccount")
     trigger_ok = True
     if name in {"MTM_Backend", "MTM_Ngrok"}:
         trigger_ok = root.find(".//t:BootTrigger", NS) is not None

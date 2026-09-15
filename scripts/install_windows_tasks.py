@@ -108,10 +108,11 @@ def harden(name: str, restart_count: int = 0) -> None:
 
 
 def verify_system_task(name: str) -> None:
-    xml = subprocess.check_output(
-        [SCHTASKS, "/Query", "/TN", name, "/XML"],
-        text=True, encoding="utf-16", errors="replace",
-    )
+    raw = subprocess.check_output([SCHTASKS, "/Query", "/TN", name, "/XML"])
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        xml = raw.decode("utf-16", errors="replace")
+    else:
+        xml = raw.decode("utf-8-sig", errors="replace")
     compact = xml.upper()
     if "S-1-5-18" not in compact and ">SYSTEM<" not in compact:
         raise RuntimeError(f"Task {name} chưa chạy bằng SYSTEM")

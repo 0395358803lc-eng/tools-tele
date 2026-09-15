@@ -9,7 +9,7 @@ if not exist "%PY%" exit /b 10
 if not errorlevel 1 goto elevated
 
 %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command ^
-  "Start-Process -FilePath '%PY%' -ArgumentList '""%SCRIPT%"" --apply-system' -Verb RunAs -Wait"
+  "$q=[char]34; $arg=$q+'%SCRIPT%'+$q; $p=Start-Process -FilePath '%PY%' -ArgumentList $arg,'--apply-system' -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
 exit /b %errorlevel%
 
 :elevated
