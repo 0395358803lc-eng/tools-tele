@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import filecmp
 import json
 import os
 from pathlib import Path
@@ -57,13 +58,30 @@ def find_ngrok_source() -> tuple[Path, Path]:
     return exe, cfg
 
 
+def copy_if_changed(src: Path, dst: Path) -> bool:
+    if dst.is_file() and filecmp.cmp(src, dst, shallow=False):
+        return False
+    tmp = dst.with_name(f".{dst.name}.new")
+    tmp.unlink(missing_ok=True)
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except PermissionError as exc:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"{dst.name} đang được sử dụng và khác bản nguồn; "
+            "dừng MTM_Ngrok rồi chạy lại installer"
+        ) from exc
+    return True
+
+
 def prepare_ngrok_runtime() -> tuple[Path, Path]:
     exe_src, cfg_src = find_ngrok_source()
     RUNTIME_NGROK.mkdir(parents=True, exist_ok=True)
     exe_dst = RUNTIME_NGROK / "ngrok.exe"
     cfg_dst = RUNTIME_NGROK / "ngrok.yml"
-    shutil.copy2(exe_src, exe_dst)
-    shutil.copy2(cfg_src, cfg_dst)
+    copy_if_changed(exe_src, exe_dst)
+    copy_if_changed(cfg_src, cfg_dst)
     return exe_dst, cfg_dst
 
 

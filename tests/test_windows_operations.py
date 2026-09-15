@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from scripts import backup_maintenance as bm
+from scripts import install_windows_tasks as iwt
 from scripts import watchdog as wd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,19 @@ class WindowsOperationsTests(unittest.TestCase):
         self.assertIn("graceful_stop.py", stop)
         self.assertIn("MTM_Backend", stop)
 
+    def test_copy_if_changed_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "src.bin"
+            dst = root / "dst.bin"
+            src.write_bytes(b"same")
+            dst.write_bytes(b"same")
+            before = dst.stat().st_mtime_ns
+            self.assertFalse(iwt.copy_if_changed(src, dst))
+            self.assertEqual(dst.stat().st_mtime_ns, before)
+            src.write_bytes(b"changed")
+            self.assertTrue(iwt.copy_if_changed(src, dst))
+            self.assertEqual(dst.read_bytes(), b"changed")
     def test_task_installer_contract(self):
         src = (ROOT / "scripts" / "install_windows_tasks.py").read_text(encoding="utf-8")
         for name in ("MTM_Backend", "MTM_Ngrok", "MTM_Watchdog", "MTM_Backup"):
