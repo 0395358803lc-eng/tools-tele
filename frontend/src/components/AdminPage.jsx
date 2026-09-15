@@ -22,7 +22,7 @@ function passwordError(value) {
 function shortId(value) { return value ? `${String(value).slice(0, 8)}…` : '—' }
 function fmt(value) { return value ? new Date(value).toLocaleString('vi-VN') : '—' }
 function activeJob(status) { return ['queued', 'running', 'cancelling', 'paused'].includes(status) }
-export default function AdminPage({ currentUser, onBack, onLogout }) {
+export default function AdminPage({ currentUser, onLogout }) {
   const [tab, setTab] = useState('overview')
   const [dashboard, setDashboard] = useState(null)
   const [users, setUsers] = useState([])
@@ -142,7 +142,6 @@ export default function AdminPage({ currentUser, onBack, onLogout }) {
             <div className="text-xs opacity-60">{currentUser?.username} · production</div></div>
           <div className="flex-1" />
           <button className="nb-btn" onClick={() => guarded(refreshDashboard)}>Làm mới</button>
-          <button className="nb-btn" onClick={onBack}>Ứng dụng</button>
           <button className="nb-btn" onClick={onLogout}>Đăng xuất</button>
         </header>
         {err && <div className="nb-card p-3 bg-brand-err text-black font-bold">{err}</div>}

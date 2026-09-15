@@ -41,7 +41,7 @@ class PasswordPolicyTests(unittest.TestCase):
 
     def test_frontend_new_password_validation_present(self):
         admin = (ROOT / 'frontend' / 'src' / 'components' / 'AdminPage.jsx').read_text(encoding='utf-8')
-        login = (ROOT / 'frontend' / 'src' / 'components' / 'LoginScreen.jsx').read_text(encoding='utf-8')
+        login = (ROOT / 'frontend' / 'src' / 'components' / 'AdminLoginScreen.jsx').read_text(encoding='utf-8')
         self.assertIn('minLength={12}', admin)
         self.assertIn('minLength={bootstrap ? 12 : undefined}', login)
         self.assertIn('passwordError', admin)

@@ -74,6 +74,26 @@ class AdminMonitoringTests(unittest.TestCase):
             self.assertIn(expected, source)
 
 
+    def test_admin_portal_is_separate_from_user_portal(self):
+        app = (ROOT / 'frontend' / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        user_login = (ROOT / 'frontend' / 'src' / 'components' / 'LoginScreen.jsx').read_text(encoding='utf-8')
+        admin_login = (ROOT / 'frontend' / 'src' / 'components' / 'AdminLoginScreen.jsx').read_text(encoding='utf-8')
+        admin_page = (ROOT / 'frontend' / 'src' / 'components' / 'AdminPage.jsx').read_text(encoding='utf-8')
+        supabase = (ROOT / 'frontend' / 'src' / 'lib' / 'supabase.js').read_text(encoding='utf-8')
+        self.assertIn("const Login = adminRoute ? AdminLoginScreen : LoginScreen", app)
+        self.assertIn("authState !== 'in' || adminRoute", app)
+        self.assertNotIn("window.location.href = '/admin'", app)
+        self.assertIn('USER PORTAL', user_login)
+        self.assertNotIn('bootstrapAdmin', user_login)
+        self.assertIn('ADMIN PORTAL', admin_login)
+        self.assertIn('Tài khoản không có quyền ADMIN', admin_login)
+        self.assertIn("signInIdentity(username, password, 'admin')", admin_login)
+        self.assertIn("buildClient('mtm-user-auth')", supabase)
+        self.assertIn("buildClient('mtm-admin-auth')", supabase)
+        self.assertNotIn('onBack', admin_page)
+        self.assertNotIn('>Ứng dụng</button>', admin_page)
+
+
     def test_hard_purge_is_tenant_scoped(self):
         with tempfile.TemporaryDirectory(prefix='mtm_purge_') as td:
             db_path = Path(td) / 'purge.db'
