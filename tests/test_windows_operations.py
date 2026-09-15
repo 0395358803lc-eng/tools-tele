@@ -36,6 +36,7 @@ class WindowsOperationsTests(unittest.TestCase):
                 wd.main()
             finally:
                 wd.MAINTENANCE, wd.acquire_lock, wd.release_lock, wd.logger, wd.probe = old
+
     def test_public_launchers_use_maintenance_and_graceful_stop(self):
         start = (ROOT / "start-public.bat").read_text(encoding="utf-8")
         stop = (ROOT / "stop-public.bat").read_text(encoding="utf-8")
@@ -52,6 +53,9 @@ class WindowsOperationsTests(unittest.TestCase):
             self.assertIn(name, src)
         self.assertIn('"/MO", "2"', src)
         self.assertIn('"03:30"', src)
+        self.assertIn("ExecutionTimeLimit", src)
+        self.assertIn("MultipleInstances IgnoreNew", src)
+        self.assertIn("AllowStartIfOnBatteries", src)
 
 
 if __name__ == "__main__":
