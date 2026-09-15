@@ -29,7 +29,7 @@ if not exist "!VENV_PY!" (
 )
 
 echo [kiểm tra] Đang xác minh gói Python...
-"!VENV_PY!" -c "import fastapi, telethon, bcrypt, aiosqlite, alembic, cryptography" >nul 2>nul
+"!VENV_PY!" -c "import fastapi, telethon, aiosqlite, alembic, cryptography, supabase" >nul 2>nul
 set "DEPS_OK=!errorlevel!"
 echo [kiểm tra] DEPS_OK=!DEPS_OK!
 
@@ -56,20 +56,7 @@ if not exist "!ENVFILE!" (
     exit /b 1
   )
   copy /Y "!ENVEXAMPLE!" "!ENVFILE!" >nul
-  "!VENV_PY!" -c "import re,pathlib,os; from cryptography.fernet import Fernet; p=pathlib.Path(os.environ['ENVFILE']); t=p.read_text(encoding='utf-8'); t=re.sub(r'SECRETS_ENCRYPTION_KEY=.*', 'SECRETS_ENCRYPTION_KEY='+Fernet.generate_key().decode(), t, count=1); p.write_text(t, encoding='utf-8')"
-  echo.
-  echo ============================================
-  echo   LẦN CHẠY ĐẦU - hãy điền backend\.env
-  echo ============================================
-  echo   - TG_API_ID    ^(from https://my.telegram.org^)
-  echo   - TG_API_HASH  ^(from https://my.telegram.org^)
-  echo   - APP_PASSWORD ^(your login password^)
-  echo.
-  echo   Lưu Notepad, đóng lại rồi chạy start.bat lần nữa
-  echo ============================================
-  start "" notepad "!ENVFILE!"
-  pause
-  exit /b 0
+  echo [OK] Da tao backend\.env.
 ) else (
   echo [kiểm tra] Đã tìm thấy backend\.env.
 )
@@ -112,7 +99,7 @@ echo   Đóng cửa sổ này để dừng máy chủ.
 echo ============================================
 echo.
 
-start "" cmd /c "timeout /t 4 /nobreak >nul & start http://localhost:8000"
+start "" cmd /c "%SystemRoot%\System32\timeout.exe /t 4 /nobreak >nul & start http://localhost:8000"
 
 cd /d "!ROOT!\backend"
 echo [cơ sở dữ liệu] Đang áp dụng migration...

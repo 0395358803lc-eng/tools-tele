@@ -9,9 +9,58 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import sys
+from urllib.parse import parse_qs, unquote, urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import dotenv_values
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
+
+def postgres_url(raw: str) -> str:
+    raw = raw.replace('postgresql+asyncpg://', 'postgresql://', 1)
+    return raw.replace('?ssl=', '?sslmode=').replace('&ssl=', '&sslmode=')
+
+def find_pg_tool(name: str) -> Path | None:
+    found = shutil.which(name)
+    if found:
+        return Path(found)
+    exe = name + ('.exe' if os.name == 'nt' else '')
+    candidates = [
+        Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'pgAdmin 4' / 'runtime' / exe,
+        Path(os.environ.get('ProgramFiles', '')) / 'pgAdmin 4' / 'runtime' / exe,
+    ]
+    base = Path(os.environ.get('ProgramFiles', '')) / 'PostgreSQL'
+    if base.exists():
+        candidates.extend(sorted(base.glob(f'*/bin/{exe}'), reverse=True))
+    return next((item for item in candidates if item.is_file()), None)
+
+def pg_connection(raw: str) -> tuple[list[str], dict[str, str]]:
+    parsed = urlsplit(postgres_url(raw))
+    args: list[str] = []
+    if parsed.hostname:
+        args += ['--host', parsed.hostname]
+    if parsed.port:
+        args += ['--port', str(parsed.port)]
+    if parsed.username:
+        args += ['--username', unquote(parsed.username)]
+    args += ['--dbname', parsed.path.lstrip('/') or 'postgres']
+    env = os.environ.copy()
+    if parsed.password:
+        env['PGPASSWORD'] = unquote(parsed.password)
+    sslmode = parse_qs(parsed.query).get('sslmode', [''])[0]
+    if sslmode:
+        env['PGSSLMODE'] = sslmode
+    return args, env
+
+def configured_postgres_url(backend: Path) -> str:
+    values = dotenv_values(backend / '.env')
+    return str(values.get('DATABASE_URL') or '')
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -45,6 +94,11 @@ def verify(stage: Path) -> dict:
             raise RuntimeError(f'Backup file missing: {rel}')
         if file.stat().st_size != expected['size'] or sha256(file) != expected['sha256']:
             raise RuntimeError(f'Checksum mismatch: {rel}')
+    if manifest.get('database_type') == 'postgresql':
+        pg_restore = find_pg_tool('pg_restore')
+        if not pg_restore:
+            raise RuntimeError('Cần pg_restore để xác minh PostgreSQL backup')
+        subprocess.run([str(pg_restore), '--list', str(stage / 'database.pgcustom')], stdout=subprocess.DEVNULL, check=True)
     return manifest
 
 
@@ -84,11 +138,14 @@ def main() -> None:
                 shutil.copy2(dest, backend / f'app.db.pre-restore-{stamp}.bak')
             shutil.copy2(src, dest)
         elif db_type == 'postgresql':
-            if not args.postgres_url:
-                raise SystemExit('Cần --postgres-url để phục hồi PostgreSQL')
-            if not shutil.which('pg_restore'):
+            target_url = (args.postgres_url or configured_postgres_url(backend)).strip()
+            if not target_url:
+                raise SystemExit('Cần PostgreSQL URL đích trong backend/.env hoặc --postgres-url')
+            pg_restore = find_pg_tool('pg_restore')
+            if not pg_restore:
                 raise SystemExit('Cần pg_restore để phục hồi PostgreSQL')
-            subprocess.run(['pg_restore', '--clean', '--if-exists', '--no-owner', '--dbname', args.postgres_url, str(stage / 'database.pgcustom')], check=True)
+            conn_args, pg_env = pg_connection(target_url)
+            subprocess.run([str(pg_restore), '--clean', '--if-exists', '--no-owner', *conn_args, str(stage / 'database.pgcustom')], env=pg_env, check=True)
         else:
             raise RuntimeError(f'Unknown database type: {db_type}')
 

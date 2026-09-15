@@ -1,178 +1,135 @@
-"""Dashboard password authentication backed by revocable SQL sessions."""
+"""Supabase Auth identity layer for the dashboard."""
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import secrets
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
-import bcrypt
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
-from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
-from .time_utils import utcnow
-from .config import settings
-from .db import AsyncSessionLocal, get_db
-from .models import AppSession, LoginAttempt
-from .audit import log_audit
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
-COOKIE_NAME = "mtm_session"
-_pw_hash: Optional[bytes] = None
+from .tenant import reset_tenant_id, set_tenant_id
+from .db import AsyncSessionLocal
+from .supabase_identity import (
+    IdentityUser,
+    create_identity_user,
+    has_admin,
+    supabase_configured,
+    verify_access_token,
+    token_claims,
+)
 
-
-def _password_hash() -> bytes:
-    global _pw_hash
-    if _pw_hash is None:
-        if not settings.APP_PASSWORD:
-            raise RuntimeError("Chưa cấu hình APP_PASSWORD")
-        _pw_hash = bcrypt.hashpw(settings.APP_PASSWORD.encode(), bcrypt.gensalt(rounds=12))
-    return _pw_hash
+router = APIRouter(prefix="/api/auth-app", tags=["auth-app"])
+_bootstrap_lock = asyncio.Lock()
 
 
-def _verify_password(password: str) -> bool:
-    if not password:
+class BootstrapIn(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=12, max_length=256)
+
+
+def _bearer_token(request: Request) -> str:
+    header = (request.headers.get("authorization") or "").strip()
+    if not header.lower().startswith("bearer "):
+        raise HTTPException(401, "Chưa đăng nhập")
+    token = header[7:].strip()
+    if not token:
+        raise HTTPException(401, "Chưa đăng nhập")
+    return token
+
+
+async def _session_after_cutoff(user: IdentityUser, token: str) -> bool:
+    if not user.session_not_before:
+        return True
+    claims = token_claims(token)
+    session_id = str(claims.get("session_id") or "").strip()
+    if not session_id:
         return False
     try:
-        return bcrypt.checkpw(password.encode(), _password_hash())
+        cutoff = datetime.fromisoformat(user.session_not_before.replace("Z", "+00:00"))
+        async with AsyncSessionLocal() as db:
+            ok = await db.scalar(text(
+                "SELECT EXISTS (SELECT 1 FROM auth.sessions "
+                "WHERE id=CAST(:sid AS uuid) AND user_id=CAST(:uid AS uuid) "
+                "AND created_at > :cutoff)"
+            ), {"sid": session_id, "uid": user.id, "cutoff": cutoff})
+        return bool(ok)
     except Exception:
         return False
 
 
-def verify_app_password(password: str) -> bool:
-    return _verify_password(password)
+async def require_auth(request: Request) -> IdentityUser:
+    token = _bearer_token(request)
+    try:
+        user = await asyncio.to_thread(verify_access_token, token)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(401, "Phiên đăng nhập không hợp lệ hoặc đã hết hạn") from exc
+    if not await _session_after_cutoff(user, token):
+        raise HTTPException(401, "Phiên đăng nhập đã bị ADMIN thu hồi")
+    request.state.current_user = user
+    tenant_token = set_tenant_id(user.id)
+    try:
+        yield user
+    finally:
+        reset_tenant_id(tenant_token)
 
 
-def _token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _client_ip(request: Request) -> str:
-    if settings.TRUST_PROXY_HEADERS:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()[:128]
-    return (request.client.host if request.client else "unknown")[:128]
-
-
-def _cookie_secure(request: Request) -> bool:
-    if settings.COOKIE_SECURE or request.url.scheme == "https":
-        return True
-    if settings.TRUST_PROXY_HEADERS:
-        return request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
-    return False
-
-
-async def _find_session(token: str) -> AppSession | None:
-    if not token:
-        return None
-    now = utcnow()
-    async with AsyncSessionLocal() as db:
-        res = await db.execute(
-            select(AppSession).where(
-                AppSession.token_hash == _token_hash(token),
-                AppSession.revoked_at.is_(None),
-                AppSession.expires_at > now,
-            )
-        )
-        row = res.scalar_one_or_none()
-        if row:
-            row.last_seen_at = now
-            await db.commit()
-        return row
-
-
-async def require_auth(request: Request, mtm_session: str = Cookie(None)):
-    session = await _find_session(mtm_session or "")
-    if not session:
-        raise HTTPException(401, "Chưa đăng nhập")
-    return True
-
-
-async def _check_rate(db: AsyncSession, ip: str) -> tuple[bool, int]:
-    now = utcnow()
-    cutoff = now - timedelta(minutes=max(1, settings.LOGIN_WINDOW_MIN))
-    await db.execute(delete(LoginAttempt).where(LoginAttempt.attempted_at < cutoff))
-    res = await db.execute(
-        select(LoginAttempt).where(
-            LoginAttempt.ip == ip,
-            LoginAttempt.success.is_(False),
-            LoginAttempt.attempted_at >= cutoff,
-        ).order_by(LoginAttempt.attempted_at.asc())
-    )
-    rows = res.scalars().all()
-    if len(rows) >= max(1, settings.LOGIN_MAX_ATTEMPTS):
-        remaining = int((rows[0].attempted_at + timedelta(minutes=settings.LOGIN_WINDOW_MIN) - now).total_seconds())
-        return False, max(1, remaining)
-    return True, 0
+async def require_admin(user: IdentityUser = Depends(require_auth)) -> IdentityUser:
+    if not user.is_admin:
+        raise HTTPException(403, "Yêu cầu quyền ADMIN")
+    return user
 
 
 async def cleanup_auth_state() -> None:
-    """Remove expired dashboard sessions and old login-attempt rows."""
-    now = utcnow()
-    cutoff = now - timedelta(minutes=max(1, settings.LOGIN_WINDOW_MIN))
-    async with AsyncSessionLocal() as db:
-        await db.execute(delete(AppSession).where(AppSession.expires_at <= now))
-        await db.execute(delete(LoginAttempt).where(LoginAttempt.attempted_at < cutoff))
-        await db.commit()
+    """Compatibility hook: Supabase owns session cleanup and refresh-token state."""
+    return None
 
 
-router = APIRouter(prefix="/api/auth-app", tags=["auth-app"])
+@router.get("/bootstrap/status")
+async def bootstrap_status():
+    if not supabase_configured():
+        return {"configured": False, "needs_admin": False}
+    try:
+        exists = await asyncio.to_thread(has_admin)
+    except Exception as exc:
+        raise HTTPException(503, "Không thể kết nối Supabase Auth") from exc
+    return {"configured": True, "needs_admin": not exists}
 
 
-class LoginIn(BaseModel):
-    password: str
-
-
-@router.post("/login")
-async def login(body: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
-    ip = _client_ip(request)
-    allowed, retry = await _check_rate(db, ip)
-    if not allowed:
-        await db.commit()
-        raise HTTPException(429, f"Quá nhiều lần thử. Hãy thử lại sau {retry} giây.")
-
-    if not _verify_password(body.password):
-        db.add(LoginAttempt(ip=ip, success=False, attempted_at=utcnow()))
-        await db.commit()
-        await asyncio.sleep(0.4)
-        raise HTTPException(401, "Mật khẩu không đúng")
-
-    now = utcnow()
-    token = secrets.token_urlsafe(48)
-    db.add(AppSession(
-        token_hash=_token_hash(token),
-        ip=ip,
-        user_agent=(request.headers.get("user-agent") or "")[:512],
-        created_at=now,
-        expires_at=now + timedelta(days=max(1, settings.SESSION_DAYS)),
-        last_seen_at=now,
-    ))
-    await db.execute(delete(LoginAttempt).where(LoginAttempt.ip == ip))
-    await db.commit()
-    response.set_cookie(
-        key=COOKIE_NAME, value=token, max_age=max(1, settings.SESSION_DAYS) * 86400,
-        httponly=True, samesite="strict", secure=_cookie_secure(request), path="/",
-    )
-    await log_audit("auth:login")
-    return {"ok": True}
-
-
-@router.post("/logout")
-async def logout(response: Response, mtm_session: str = Cookie(None), db: AsyncSession = Depends(get_db)):
-    if mtm_session:
-        res = await db.execute(select(AppSession).where(AppSession.token_hash == _token_hash(mtm_session)))
-        row = res.scalar_one_or_none()
-        if row and row.revoked_at is None:
-            row.revoked_at = utcnow()
-            await db.commit()
-    response.delete_cookie(COOKIE_NAME, path="/")
-    await log_audit("auth:logout")
-    return {"ok": True}
+@router.post("/bootstrap")
+async def bootstrap_admin(body: BootstrapIn):
+    if not supabase_configured():
+        raise HTTPException(503, "Chưa cấu hình Supabase")
+    async with _bootstrap_lock:
+        try:
+            if await asyncio.to_thread(has_admin):
+                raise HTTPException(409, "ADMIN đầu tiên đã tồn tại")
+            user = await asyncio.to_thread(
+                create_identity_user, body.username, body.password, "admin"
+            )
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "Không thể tạo ADMIN trên Supabase") from exc
+    return {"ok": True, "user": user.__dict__}
 
 
 @router.get("/me")
-async def me(mtm_session: str = Cookie(None)):
-    return {"authed": bool(await _find_session(mtm_session or ""))}
+async def me(user: IdentityUser = Depends(require_auth)):
+    return {"authed": True, "user": user.__dict__}
+
+
+@router.post("/logout")
+async def logout():
+    # Refresh-token revocation is performed by supabase-js on the client.
+    return {"ok": True}
+
+
+@router.post("/login", include_in_schema=False)
+async def legacy_login_disabled():
+    raise HTTPException(410, "Đăng nhập APP_PASSWORD đã được thay bằng Supabase Auth")

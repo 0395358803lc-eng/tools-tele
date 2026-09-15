@@ -6,6 +6,7 @@ import json
 import uuid
 from collections import Counter
 from typing import Literal
+from openpyxl import Workbook
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,7 @@ from ..db import get_db
 from ..models import Account, AccountProxy, BulkJob, PhoneCheckAccount, PhoneCheckItem
 from ..phone_checker import normalize_phone_list
 from ..phone_import import parse_phone_file
+from ..quota import assert_daily_phone_checks, assert_job_capacity
 from ..tg_manager import manager
 from ..time_utils import utcnow
 from ..utils import read_upload_limited
@@ -151,6 +153,8 @@ async def create_phone_check_job(body: CreatePhoneCheckIn, db: AsyncSession = De
         raise HTTPException(409, f"Có {len(busy_ids)} tài khoản đang thuộc tác vụ check số khác")
 
     valid_rows = [row for row in rows if row["normalized"]]
+    await assert_job_capacity()
+    await assert_daily_phone_checks(len(valid_rows))
     active_accounts = ordered[: min(len(ordered), len(valid_rows))]
     if valid_rows and not active_accounts:
         raise HTTPException(409, "Không có tài khoản khả dụng để kiểm tra")
@@ -359,6 +363,49 @@ async def cancel_phone_check_job(job_id: str, db: AsyncSession = Depends(get_db)
     return {"ok": True, "status": "cancelling"}
 
 
+@router.post("/jobs/{job_id}/rebalance")
+async def rebalance_phone_check_job(job_id: str, db: AsyncSession = Depends(get_db)):
+    job = await db.get(BulkJob, job_id)
+    if not job or job.type != "phone_check":
+        raise HTTPException(404, "Không tìm thấy tác vụ check số")
+    if job.status not in {"queued", "running", "paused", "interrupted"}:
+        raise HTTPException(409, "Tác vụ hiện không thể phân phối lại")
+    account_rows = (await db.execute(
+        select(PhoneCheckAccount).where(PhoneCheckAccount.job_id == job_id).order_by(PhoneCheckAccount.id)
+    )).scalars().all()
+    ready_ids = [r.account_id for r in account_rows if r.account_id and manager.get(r.account_id)]
+    if not ready_ids:
+        raise HTTPException(409, "Không có tài khoản đang kết nối để nhận lại công việc")
+    safe_statuses = {"queued", "retry_required", "temporary_error", "rate_limited", "in_flight_unknown"}
+    items = (await db.execute(
+        select(PhoneCheckItem).where(
+            PhoneCheckItem.job_id == job_id,
+            PhoneCheckItem.status.in_(safe_statuses),
+        ).order_by(PhoneCheckItem.id)
+    )).scalars().all()
+    moved = 0
+    cursor = 0
+    ready = set(ready_ids)
+    for item in items:
+        if item.account_id in ready:
+            continue
+        item.account_id = ready_ids[cursor % len(ready_ids)]
+        cursor += 1
+        moved += 1
+    counts = Counter(item.account_id for item in (await db.execute(
+        select(PhoneCheckItem).where(PhoneCheckItem.job_id == job_id, PhoneCheckItem.account_id.is_not(None))
+    )).scalars().all())
+    for row in account_rows:
+        row.assigned_total = int(counts.get(row.account_id, 0))
+        if row.account_id in ready and row.status in {"stopped", "waiting_connection", "paused"}:
+            row.status = "queued"
+        row.updated_at = utcnow()
+    job.heartbeat_at = utcnow()
+    await db.commit()
+    await log_audit("phone_check:rebalance", detail={"job_id": job_id, "moved": moved, "ready_accounts": len(ready_ids)})
+    return {"ok": True, "moved": moved, "ready_accounts": ready_ids}
+
+
 async def _export_rows(db: AsyncSession, job_id: str, status: str | None = None, q: str | None = None):
     job = await db.get(BulkJob, job_id)
     if not job or job.type != "phone_check":
@@ -374,6 +421,24 @@ async def export_phone_check_json(job_id: str, status: str | None = Query(None),
     job, rows = await _export_rows(db, job_id, status, q)
     payload = json.dumps({"job": _job_dict(job), "results": [_item_dict(row) for row in rows]}, ensure_ascii=False, default=str)
     return StreamingResponse(io.BytesIO(payload.encode("utf-8")), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="phone-check-{job_id}.json"'})
+
+
+@router.get("/jobs/{job_id}/export.xlsx")
+async def export_phone_check_xlsx(job_id: str, status: str | None = Query(None), q: str | None = Query(None, max_length=100), db: AsyncSession = Depends(get_db)):
+    _job, rows = await _export_rows(db, job_id, status, q)
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("results")
+    ws.append(["original_phone", "normalized_phone", "status", "account_id", "telegram_user_id", "username", "first_name", "last_name", "presence", "last_online_at", "attempts", "error_code", "error_detail"])
+    for row in rows:
+        ws.append([row.original_phone, row.normalized_phone or "", row.status, row.account_id or "", row.telegram_user_id or "", row.username or "", row.first_name or "", row.last_name or "", row.presence or "", str(row.last_online_at or ""), row.attempts, row.error_code or "", row.error_detail or ""])
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="phone-check-{job_id}.xlsx"'},
+    )
 
 
 @router.get("/jobs/{job_id}/export.csv")

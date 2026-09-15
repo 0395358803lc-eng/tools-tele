@@ -78,6 +78,10 @@ export default function MessagingTab({ accounts, selected }) {
   const [targetsText, setTargetsText] = useState('')
   const [importingTargets, setImportingTargets] = useState(false)
   const [importInfo, setImportInfo] = useState(null)
+  const [recipientFile, setRecipientFile] = useState(null)
+  const [importPreview, setImportPreview] = useState(null)
+  const [importColumns, setImportColumns] = useState([])
+  const [importHasHeader, setImportHasHeader] = useState(false)
   const recipientFileRef = useRef(null)
   const [busy, setBusy] = useState(false)
 
@@ -119,20 +123,33 @@ export default function MessagingTab({ accounts, selected }) {
     if (!file) return
     setImportingTargets(true)
     try {
-      const result = await Endpoints.importMessageTargets(file)
-      const merged = parseTargetList([targetsText, ...(result.targets || [])].join('\n'))
-      setTargetsText(merged.join('\n'))
-      setImportInfo(result)
-      const notes = []
-      if (result.duplicates) notes.push(`${result.duplicates} trùng`)
-      if (result.invalid_count) notes.push(`${result.invalid_count} không hợp lệ`)
-      toast.success(`Đã thêm ${result.count} người nhận từ ${result.filename}${notes.length ? ` (${notes.join(', ')})` : ''}`)
-    } catch (e) {
-      toast.error(e.message)
-    } finally {
+      const preview = await Endpoints.previewMessageTargets(file)
+      setRecipientFile(file)
+      setImportPreview(preview)
+      setImportColumns(preview.suggested_columns?.length ? preview.suggested_columns : (preview.column_count === 1 ? [0] : []))
+      setImportHasHeader(!!preview.header_detected)
+      setImportInfo(null)
+    } catch (e) { toast.error(e.message) }
+    finally {
       setImportingTargets(false)
       if (recipientFileRef.current) recipientFileRef.current.value = ''
     }
+  }
+
+  async function confirmRecipientImport() {
+    if (!recipientFile || !importColumns.length) return toast.error('Chọn ít nhất một cột người nhận')
+    setImportingTargets(true)
+    try {
+      const result = await Endpoints.importMessageTargets(recipientFile, importColumns, importHasHeader)
+      const merged = parseTargetList([targetsText, ...(result.targets || [])].join('\n'))
+      setTargetsText(merged.join('\n')); setImportInfo(result)
+      setImportPreview(null); setRecipientFile(null); setImportColumns([])
+      const notes = []
+      if (result.duplicates) notes.push(`${result.duplicates} trùng`)
+      if (result.invalid_count) notes.push(`${result.invalid_count} không hợp lệ`)
+      toast.success(`Đã thêm ${result.count} người nhận${notes.length ? ` (${notes.join(', ')})` : ''}`)
+    } catch (e) { toast.error(e.message) }
+    finally { setImportingTargets(false) }
   }
 
   async function sendMultiTargets() {
@@ -239,6 +256,25 @@ export default function MessagingTab({ accounts, selected }) {
               Xóa danh sách
             </button>
           </div>
+          {importPreview && (
+            <div className="nb-card-sm p-3 text-xs mb-2 space-y-2">
+              <div className="font-extrabold uppercase">Xem trước file · {importPreview.rows} dòng</div>
+              <div className="flex flex-wrap gap-2">
+                {(importPreview.headers || []).map((header, idx) => (
+                  <label key={idx} className={'nb-badge cursor-pointer ' + (importColumns.includes(idx) ? 'bg-brand-pri text-black' : 'bg-white text-black')}>
+                    <input type="checkbox" className="mr-1" checked={importColumns.includes(idx)}
+                      onChange={() => setImportColumns((old) => old.includes(idx) ? old.filter((x) => x !== idx) : [...old, idx])} />
+                    {header || `Cột ${idx + 1}`}
+                  </label>
+                ))}
+              </div>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={importHasHeader} onChange={(e) => setImportHasHeader(e.target.checked)} /> Dòng đầu là tiêu đề cột</label>
+              <div className="overflow-auto max-h-36 border border-black/20 dark:border-white/20">
+                <table className="w-full text-[10px]"><tbody>{(importPreview.sample || []).map((row, r) => <tr key={r} className="border-b border-black/10 dark:border-white/10">{row.map((cell, c) => <td key={c} className="p-1 whitespace-nowrap max-w-40 truncate">{cell}</td>)}</tr>)}</tbody></table>
+              </div>
+              <div className="flex gap-2"><button className="nb-btn-pri !py-1 !px-2" disabled={importingTargets || !importColumns.length} onClick={confirmRecipientImport}>Nhập cột đã chọn</button><button className="nb-btn !py-1 !px-2" onClick={() => { setImportPreview(null); setRecipientFile(null); setImportColumns([]) }}>Hủy</button></div>
+            </div>
+          )}
           {importInfo && (
             <div className="nb-card-sm p-2 text-[11px] mb-2">
               <b>{importInfo.filename}</b> · {importInfo.count} người nhận

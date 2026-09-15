@@ -23,7 +23,7 @@
 | Máy chủ cục bộ | Chạy tại `127.0.0.1`, giao diện không bị công khai ra Internet khi dùng chế độ cục bộ. |
 | Phiên Telegram | Dùng Telethon session được mã hóa và lưu trong SQL; tệp `.session` chỉ dùng để nhập hoặc dự phòng. |
 | Công cụ hàng loạt | Đổi tên, bio, ảnh hồ sơ, tham gia/rời nhóm, thao tác tin nhắn và kiểm tra bảo mật hàng loạt. |
-| Cổng mật khẩu | Đăng nhập dashboard bằng `APP_PASSWORD`, phiên đăng nhập có thể thu hồi và được lưu trong SQL với cookie same-site nghiêm ngặt. |
+| Định danh người dùng | Đăng nhập bằng Supabase Auth với tài khoản riêng và role `admin/user`; backend xác thực Bearer access token. |
 
 ---
 
@@ -34,9 +34,9 @@
 2. Cài Node.js 18+ từ https://nodejs.org.
 3. Tải kho mã dưới dạng ZIP hoặc chạy: git clone https://github.com/0xnurrabby/multi-tg-manager.git
 4. Mở thư mục dự án.
-5. Nhấp đúp start.bat.
-6. Điền backend\.env khi Notepad mở.
-7. Lưu tệp, đóng Notepad rồi nhấp đúp start.bat lần nữa.
+5. Nhấp đúp `start.bat`.
+6. Lần chạy đầu, giao diện sẽ yêu cầu tạo ADMIN đầu tiên trên Supabase.
+7. Đăng nhập tại `http://localhost:8000`; ADMIN có thể mở `/admin` để quản lý user. Sau đó vào **Cài đặt → Telegram API** để nhập `TG_API_ID` và `TG_API_HASH`.
 ```
 
 Ứng dụng mở tại `http://localhost:8000`.
@@ -45,19 +45,16 @@
 
 ## Cấu hình
 
-Điền các giá trị sau trong `backend/.env`:
+`backend/.env` cần cấu hình Supabase Identity phía server:
 
 ```env
-TG_API_ID=your_api_id_from_my_telegram_org
-TG_API_HASH=your_api_hash_from_my_telegram_org
-APP_PASSWORD=change_me_to_a_long_password
-SECRETS_ENCRYPTION_KEY=auto_generated_by_start_bat
-SESSIONS_DIR=./sessions
-DB_URL=sqlite+aiosqlite:///./app.db
-# Production/Replit: đặt DATABASE_URL=postgresql://...
-# Bắt buộc để mã hóa phiên Telegram và mật khẩu 2FA ghi nhớ trong SQL:
-SECRETS_ENCRYPTION_KEY=<Fernet key>
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
+SUPABASE_JWKS_URL=https://your-project.supabase.co/auth/v1/.well-known/jwks.json
 ```
+
+`TG_API_ID` và `TG_API_HASH` được nhập trong **Cài đặt → Telegram API**. Khóa mã hóa dữ liệu nhạy cảm được ứng dụng tự tạo và quản lý nội bộ trong thư mục session.
 
 Kiểm tra môi trường trên máy mới:
 

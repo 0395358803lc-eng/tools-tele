@@ -6,6 +6,7 @@ from typing import Awaitable, Callable, Optional
 from telethon.errors import FloodWaitError
 from .config import settings
 from .telegram_errors import classify_error
+from .runtime_settings import bulk_limits
 
 
 async def jitter_delay(min_s: float | None = None, max_s: float | None = None):
@@ -127,21 +128,23 @@ def is_soft_error(e: Exception) -> bool:
 
 
 class BulkPacer:
-    """Serialize action start times while still allowing bounded in-flight work."""
+    """Serialize action starts using the current tenant's persisted rate limits."""
 
-    def __init__(self):
+    def __init__(self, min_s: float | None = None, max_s: float | None = None):
         self._lock = asyncio.Lock()
         self._next_start = 0.0
+        self._min_s = min_s
+        self._max_s = max_s
 
     async def wait_turn(self):
         async with self._lock:
+            if self._min_s is None or self._max_s is None:
+                self._min_s, self._max_s, _ = await bulk_limits()
             loop = asyncio.get_running_loop()
             now = loop.time()
             if self._next_start > now:
                 await asyncio.sleep(self._next_start - now)
-            lo = max(0.0, float(getattr(settings, "RATE_MIN", 0.7)))
-            hi = max(lo, float(getattr(settings, "RATE_MAX", 1.5)))
-            self._next_start = loop.time() + random.uniform(lo, hi)
+            self._next_start = loop.time() + random.uniform(self._min_s, self._max_s)
 
 
 async def bulk_stream(
@@ -166,7 +169,10 @@ async def bulk_stream(
     accounts = unique_accounts
 
     total = len(accounts)
-    conc = concurrency if concurrency is not None else getattr(settings, "CONCURRENCY", 8)
+    if concurrency is None:
+        _, _, conc = await bulk_limits()
+    else:
+        conc = concurrency
     try:
         conc = max(1, min(50, int(conc)))
     except (TypeError, ValueError):

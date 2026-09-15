@@ -6,8 +6,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    TG_API_ID: int = 0
-    TG_API_HASH: str = ""
+    NODE_ENV: str = "development"
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = ""
+    APP_VERSION: str = "1.0.0"
+    BUILD_SHA: str = ""
+    BUILD_TIMESTAMP: str = ""
+    LOG_FILE_ENABLED: bool = False
+    LOG_FILE_MAX_BYTES: int = 10_000_000
+    LOG_FILE_BACKUP_COUNT: int = 5
+    RETENTION_AUDIT_DAYS: int = 180
+    RETENTION_STATUS_DAYS: int = 90
+    RETENTION_JOBS_DAYS: int = 90
+    RETENTION_SECURITY_DAYS: int = 180
+    RETENTION_TARGET_CHECK_DAYS: int = 90
+    RETENTION_LOGIN_DAYS: int = 30
     SESSIONS_DIR: str = "./sessions"
     DB_URL: str = "sqlite+aiosqlite:///./app.db"
     DATABASE_URL: str = ""
@@ -26,12 +39,19 @@ class Settings(BaseSettings):
     RECONNECT_BACKOFF_JITTER_RATIO: float = 0.2
     TG_RPC_TIMEOUT_SECONDS: float = 45.0
     API_REQUEST_TIMEOUT_SECONDS: float = 60.0
+    API_RATE_LIMIT_PER_MIN: int = 600
+    ADMIN_RATE_LIMIT_PER_MIN: int = 120
+    AUTH_RATE_LIMIT_PER_MIN: int = 60
     AUTO_RECONNECT: bool = True
     NOTIFICATION_SOUND: bool = True
     ALLOWED_ORIGIN: str = ""
+    PUBLIC_URL: str = ""
 
-    APP_PASSWORD: str = ""
-    SECRETS_ENCRYPTION_KEY: str = ""
+    SUPABASE_URL: str = ""
+    SUPABASE_PUBLISHABLE_KEY: str = ""
+    SUPABASE_SECRET_KEY: str = ""
+    SUPABASE_JWKS_URL: str = ""
+    LEGACY_OWNER_USER_ID: str = ""
     SESSION_DAYS: int = 14
     LOGIN_MAX_ATTEMPTS: int = 5
     LOGIN_WINDOW_MIN: int = 15
@@ -44,6 +64,7 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         raw = (self.DATABASE_URL or self.DB_URL).strip()
+        raw = raw.replace("?sslmode=", "?ssl=").replace("&sslmode=", "&ssl=")
         if raw.startswith("postgres://"):
             return "postgresql+asyncpg://" + raw[len("postgres://"):]
         if raw.startswith("postgresql://"):

@@ -52,6 +52,26 @@ class BackupRestoreTests(unittest.TestCase):
             if os.name != 'nt':
                 self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
 
+    def test_nested_tenant_session_and_encryption_key_round_trip(self):
+        with tempfile.TemporaryDirectory(prefix='mtm_nested_backup_') as td:
+            base = Path(td); src = base/'src'; dst = base/'dst'; archive = base/'runtime.tar.gz'
+            sessions = src/'backend'/'sessions'; tenant = sessions/'user_test'; tenant.mkdir(parents=True)
+            dst.mkdir()
+            (src/'backend'/'.env').write_text('DB_URL=sqlite+aiosqlite:///./app.db\nSESSIONS_DIR=./sessions\n', encoding='utf-8')
+            for path, value in [(src/'backend'/'app.db','main'), (tenant/'nested.session','tenant')]:
+                db=sqlite3.connect(path); db.execute('create table t(v text)'); db.execute('insert into t values(?)',(value,)); db.commit(); db.close()
+            (sessions/'.encryption.key').write_bytes(b'test-encryption-key')
+            subprocess.run([PYTHON,str(ROOT/'scripts'/'backup_runtime.py'),'--project-root',str(src),'--output',str(archive)],check=True,stdout=subprocess.PIPE)
+            subprocess.run([PYTHON,str(ROOT/'scripts'/'restore_runtime.py'),str(archive),'--project-root',str(dst),'--force'],check=True,stdout=subprocess.PIPE)
+            db=sqlite3.connect(dst/'backend'/'sessions'/'user_test'/'nested.session')
+            self.assertEqual(db.execute('select v from t').fetchone()[0], 'tenant'); db.close()
+            self.assertEqual((dst/'backend'/'sessions'/'.encryption.key').read_bytes(), b'test-encryption-key')
+            import json, tarfile
+            with tarfile.open(archive,'r:gz') as tar:
+                manifest=json.load(tar.extractfile('manifest.json'))
+            self.assertTrue(manifest['encryption_key_included'])
+            self.assertEqual(manifest['session_count'], 1)
+
     def test_include_env_does_not_claim_injected_secrets(self):
         with tempfile.TemporaryDirectory(prefix='mtm_backup_no_env_') as td:
             base = Path(td)

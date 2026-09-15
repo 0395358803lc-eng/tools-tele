@@ -27,6 +27,9 @@ class EncryptedSessionTests(unittest.TestCase):
                 class Client:
                     pass
 
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     async with AsyncSessionLocal() as db:
                         a=Account(phone='+10000000031',session_file='acc_test',status='connected')
@@ -66,6 +69,9 @@ class EncryptedSessionTests(unittest.TestCase):
                 from app.models import Account
                 from app import telegram_session_store, secrets_store
                 class Client: pass
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     async with AsyncSessionLocal() as db:
                         a=Account(phone='+10000000032',session_file='acc_wrong_key',status='connected')
@@ -78,10 +84,14 @@ class EncryptedSessionTests(unittest.TestCase):
                 asyncio.run(main())
             """)
             aid=subprocess.check_output([PYTHON,'-c',writer],cwd=BACKEND,env=env,text=True).strip().splitlines()[-1]
-            bad_env=env.copy(); bad_env['SECRETS_ENCRYPTION_KEY']=key2
+            (sessions/'.encryption.key').write_text(key2, encoding='ascii')
+            bad_env=env.copy()
             reader=textwrap.dedent(f"""
                 import asyncio
                 from app import telegram_session_store, secrets_store
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     failures=0
                     for coro in (

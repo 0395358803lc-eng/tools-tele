@@ -3,7 +3,7 @@ import re
 import uuid
 from urllib.parse import urlparse, parse_qs
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,10 +32,12 @@ from ..tg_manager import manager
 from ..utils import friendly_error, bulk_stream, BulkPacer, read_upload_limited
 from ..config import settings
 from ..audit import log_audit
+from ..runtime_settings import bulk_limits
+from ..quota import assert_daily_messages, assert_job_capacity
 from ..message_dispatch import (
     eligible_message_accounts, multi_target_message_stream, normalize_message_target, normalize_message_targets,
 )
-from ..recipient_import import parse_recipient_file
+from ..recipient_import import parse_recipient_file, preview_recipient_file, extract_recipient_columns
 
 router = APIRouter(prefix="/api/messaging", tags=["messaging"])
 
@@ -77,6 +79,7 @@ async def _all_accounts_named(db: AsyncSession) -> list[tuple[int, str, str]]:
 
 @router.post("/{account_id}/send")
 async def send_message(account_id: int, body: SendMessageIn):
+    await assert_daily_messages(1)
     cli = manager.get(account_id)
     if not cli:
         raise HTTPException(409, "Tài khoản chưa kết nối")
@@ -92,6 +95,7 @@ async def send_message(account_id: int, body: SendMessageIn):
 @router.post("/bulk_send")
 async def bulk_send(body: BulkMessageIn, db: AsyncSession = Depends(get_db)):
     accounts = await _accounts_named(db, body.account_ids)
+    await assert_daily_messages(len(accounts))
     target, text = body.target, body.text
 
     async def _send(cli, aid):
@@ -103,13 +107,33 @@ async def bulk_send(body: BulkMessageIn, db: AsyncSession = Depends(get_db)):
 
 
 
-@router.post("/import_targets")
-async def import_message_targets(file: UploadFile = File(...)):
+@router.post("/import_targets/preview")
+async def preview_message_targets(file: UploadFile = File(...)):
     filename = file.filename or ""
     try:
         data = await read_upload_limited(file, 5 * 1024 * 1024)
-        parsed = parse_recipient_file(filename, data)
+        preview = preview_recipient_file(filename, data)
     except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        raise HTTPException(400, "Không thể đọc tệp người nhận")
+    return {"filename": filename, **preview}
+
+
+@router.post("/import_targets")
+async def import_message_targets(
+    file: UploadFile = File(...),
+    selected_columns: str = Form(""),
+    has_header: bool | None = Form(None),
+):
+    filename = file.filename or ""
+    try:
+        data = await read_upload_limited(file, 5 * 1024 * 1024)
+        selected = None
+        if selected_columns.strip():
+            selected = [int(v.strip()) for v in selected_columns.split(",") if v.strip()]
+        parsed = extract_recipient_columns(filename, data, selected, has_header) if selected is not None else parse_recipient_file(filename, data)
+    except (ValueError, TypeError) as exc:
         raise HTTPException(400, str(exc))
     except Exception:
         raise HTTPException(400, "Không thể đọc tệp người nhận")
@@ -132,25 +156,17 @@ async def import_message_targets(file: UploadFile = File(...)):
         targets.append(display)
         if len(targets) > 200:
             raise HTTPException(400, "Tệp có hơn 200 người nhận hợp lệ. Hãy chia thành nhiều tác vụ, tối đa 200 người nhận mỗi lần.")
-
     if not targets:
         raise HTTPException(400, "Không tìm thấy người nhận hợp lệ trong tệp")
+    invalid_count = len(parsed["raw_targets"]) - len(targets) - duplicate_count
     await log_audit("message:import_targets", detail={
-        "count": len(targets),
-        "rows": parsed["rows"],
-        "columns": parsed["columns"],
-        "duplicates": duplicate_count,
-        "invalid_count": len(parsed["raw_targets"]) - len(targets) - duplicate_count,
+        "count": len(targets), "rows": parsed["rows"], "columns": parsed["columns"],
+        "duplicates": duplicate_count, "invalid_count": invalid_count,
     })
     return {
-        "filename": filename,
-        "targets": targets,
-        "count": len(targets),
-        "rows": parsed["rows"],
-        "columns": parsed["columns"],
-        "duplicates": duplicate_count,
-        "invalid": invalid,
-        "invalid_count": len(parsed["raw_targets"]) - len(targets) - duplicate_count,
+        "filename": filename, "targets": targets, "count": len(targets),
+        "rows": parsed["rows"], "columns": parsed["columns"],
+        "duplicates": duplicate_count, "invalid": invalid, "invalid_count": invalid_count,
     }
 
 
@@ -166,6 +182,8 @@ async def multi_send(body: MultiTargetMessageIn, db: AsyncSession = Depends(get_
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
+    await assert_daily_messages(len(targets))
+    await assert_job_capacity()
     accounts = await _accounts_named(db, body.account_ids)
     eligible, excluded = await eligible_message_accounts(accounts)
     if not eligible:
@@ -509,7 +527,7 @@ async def target_check(body: TargetUsageCheckIn, db: AsyncSession = Depends(get_
         raise HTTPException(400, str(exc))
 
     accounts = await _all_accounts_named(db)
-    conc = max(1, min(50, int(getattr(settings, "CONCURRENCY", 8) or 8)))
+    _, _, conc = await bulk_limits()
     sem = asyncio.Semaphore(conc)
     pacer = BulkPacer()
     peer: dict | None = None
@@ -668,6 +686,7 @@ async def chat_history(account_id: int, peer: str, limit: int = 40):
 
 @router.post("/{account_id}/chat_send")
 async def chat_send(account_id: int, body: ChatSendIn):
+    await assert_daily_messages(1)
     cli = manager.get(account_id)
     if not cli:
         raise HTTPException(409, "Tài khoản chưa kết nối")

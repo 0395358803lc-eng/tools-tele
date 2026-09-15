@@ -31,8 +31,7 @@ class JobStoreTests(unittest.TestCase):
                 from app.db import AsyncSessionLocal
                 from app.models import Account, BulkJob
 
-                async def main():
-                    async with AsyncSessionLocal() as db:
+                from app.tenant import set_tenant_id\n                set_tenant_id('00000000-0000-4000-8000-000000000001')\n\n                async def main():\n                    async with AsyncSessionLocal() as db:
                         a = Account(phone='job-test', session_file='x', status='connected')
                         db.add(a); await db.commit(); await db.refresh(a)
                         aid = a.id
@@ -51,7 +50,8 @@ class JobStoreTests(unittest.TestCase):
                     stale = await job_store.create_job('stale', [(aid, 'job-test', 'Job Test')])
                     async with AsyncSessionLocal() as db:
                         job = await db.get(BulkJob, stale)
-                        job.heartbeat_at = datetime.now() - timedelta(seconds=1000)
+                        from app.time_utils import utcnow
+                        job.heartbeat_at = utcnow() - timedelta(seconds=1000)
                         await db.commit()
                     recovered = await job_store.recover_interrupted_jobs(stale_after_seconds=30)
                     async with AsyncSessionLocal() as db:
@@ -79,8 +79,7 @@ class JobStoreTests(unittest.TestCase):
                 from app.tg_manager import manager
                 from app.utils import bulk_stream
 
-                async def main():
-                    async with AsyncSessionLocal() as db:
+                from app.tenant import set_tenant_id\n                set_tenant_id('00000000-0000-4000-8000-000000000001')\n\n                async def main():\n                    async with AsyncSessionLocal() as db:
                         a=Account(phone='timeout-test',session_file='x',status='connected')
                         db.add(a); await db.commit(); await db.refresh(a); aid=a.id
                     manager._clients[aid]=object()
@@ -125,8 +124,7 @@ class JobStoreTests(unittest.TestCase):
                             if line.strip(): events.append(json.loads(line))
                     return events
 
-                async def main():
-                    async with AsyncSessionLocal() as db:
+                from app.tenant import set_tenant_id\n                set_tenant_id('00000000-0000-4000-8000-000000000001')\n\n                async def main():\n                    async with AsyncSessionLocal() as db:
                         a=Account(phone='retry-test',session_file='x',status='connected')
                         db.add(a); await db.commit(); await db.refresh(a); aid=a.id
 

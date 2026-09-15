@@ -8,6 +8,7 @@ from telethon import utils
 from telethon.errors import FloodWaitError
 
 from ..audit import log_audit
+from ..quota import assert_daily_messages
 from ..schemas import ChatSendIn
 from ..tg_manager import SERVICE_ID, manager
 from ..utils import friendly_error
@@ -64,29 +65,47 @@ async def inbox_activity(since_seq: int = 0):
 
 
 @router.get("/{account_id}/dialogs")
-async def inbox_dialogs(account_id: int, limit: int = 60, unread_only: bool = False):
+async def inbox_dialogs(
+    account_id: int, limit: int = 60, unread_only: bool = False,
+    q: str = "", offset: int = 0,
+):
     cli = _client(account_id)
     limit = max(1, min(100, int(limit)))
+    offset = max(0, min(1000, int(offset)))
+    needle = (q or "").strip().lower()[:100]
+    scan_limit = 300 if needle else min(300, offset + limit + 1)
 
     async def collect():
         rows = []
-        async for dialog in cli.iter_dialogs(limit=limit):
+        async for dialog in cli.iter_dialogs(limit=scan_limit):
             entity_id = getattr(dialog.entity, "id", None)
             if entity_id == SERVICE_ID:
                 continue
             row = _dialog_to_dict(dialog)
             if unread_only and row["unread_count"] <= 0:
                 continue
+            if needle:
+                last = row.get("last_message") or {}
+                haystack = " ".join([
+                    str(row.get("title") or ""), str(row.get("username") or ""),
+                    str(last.get("text") or ""), str(last.get("media") or ""),
+                ]).lower()
+                if needle not in haystack:
+                    continue
             rows.append(row)
         return rows
 
     try:
-        dialogs = await asyncio.wait_for(collect(), timeout=45)
+        rows = await asyncio.wait_for(collect(), timeout=45)
+        page = rows[offset:offset + limit]
         await manager.mark_operation_success(account_id)
         return {
-            "account_id": account_id,
-            "dialogs": dialogs,
-            "unread_total": sum(row["unread_count"] for row in dialogs),
+            "account_id": account_id, "dialogs": page,
+            "unread_total": sum(row["unread_count"] for row in rows),
+            "offset": offset, "limit": limit,
+            "has_more": len(rows) > offset + limit,
+            "next_offset": offset + len(page),
+            "matched_in_scan": len(rows), "scan_limit": scan_limit,
         }
     except Exception as exc:
         await manager.mark_operation_error(account_id, exc)
@@ -122,8 +141,32 @@ async def inbox_mark_read(account_id: int, body: InboxPeerIn):
         raise HTTPException(400, friendly_error(exc))
 
 
+@router.post("/{account_id}/read-all")
+async def inbox_mark_all_read(account_id: int):
+    cli = _client(account_id)
+    marked = 0
+    try:
+        async for dialog in cli.iter_dialogs(limit=100):
+            if int(getattr(dialog, "unread_count", 0) or 0) <= 0:
+                continue
+            entity = dialog.entity
+            if getattr(entity, "id", None) == SERVICE_ID:
+                continue
+            await asyncio.wait_for(cli.send_read_acknowledge(entity, clear_mentions=True), timeout=30)
+            marked += 1
+        await log_audit("inbox:mark_all_read", account_id, {"dialogs": marked})
+        return {"ok": True, "dialogs": marked}
+    except FloodWaitError as exc:
+        await manager.mark_flood_wait(account_id, exc.seconds)
+        raise HTTPException(429, friendly_error(exc))
+    except Exception as exc:
+        await manager.mark_operation_error(account_id, exc)
+        raise HTTPException(400, friendly_error(exc))
+
+
 @router.post("/{account_id}/reply")
 async def inbox_reply(account_id: int, body: ChatSendIn):
+    await assert_daily_messages(1)
     cli = _client(account_id)
     text = (body.text or "").strip()
     if not text:

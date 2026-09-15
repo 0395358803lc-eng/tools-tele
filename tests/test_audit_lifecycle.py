@@ -25,8 +25,8 @@ class AuditLifecycleTests(unittest.TestCase):
 
             async def main():
                 captured=[]
-                accounts.settings.TG_API_ID=12345
-                accounts.settings.TG_API_HASH='a'*32
+                async def fake_require(): return None
+                accounts._require_telegram_api_config=fake_require
                 async def fake_send_code(phone): return 'server-hash'
                 async def fake_audit(action, account_id=None, detail=None):
                     captured.append((action, account_id, detail or {}))
@@ -57,6 +57,9 @@ class AuditLifecycleTests(unittest.TestCase):
                 from app.models import AuditLog, GoneAccount
                 from app.routers.accounts import clear_gone_accounts
 
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     async with AsyncSessionLocal() as db:
                         db.add_all([
@@ -86,6 +89,9 @@ class AuditLifecycleTests(unittest.TestCase):
                 from app.db import AsyncSessionLocal
                 from app.models import Account, AuditLog, SecurityMessage
                 from app.routers.security import mark_read, mark_all_read
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     async with AsyncSessionLocal() as db:
@@ -136,6 +142,7 @@ class AuditLifecycleTests(unittest.TestCase):
             'accounts.py:qr_poll',
             'accounts.py:qr_sign_in_2fa',
             'messaging.py:allowed_reactions',
+            'messaging.py:preview_message_targets',
             'messaging.py:target_check',
             'phone_checks.py:preview_numbers',
             'phone_checks.py:import_numbers',

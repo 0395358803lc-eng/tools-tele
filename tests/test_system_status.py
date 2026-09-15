@@ -28,6 +28,9 @@ class SystemStatusTests(unittest.TestCase):
                 'TG_API_HASH': '0123456789abcdef0123456789abcdef',
                 'APP_PASSWORD': 'test-password-strong',
                 'SECRETS_ENCRYPTION_KEY': Fernet.generate_key().decode(),
+                'SUPABASE_URL': 'https://example.supabase.co',
+                'SUPABASE_PUBLISHABLE_KEY': 'test-publishable-key',
+                'SUPABASE_SECRET_KEY': 'test-secret-key',
                 'NODE_ENV': 'development',
             })
             subprocess.run(
@@ -38,6 +41,9 @@ class SystemStatusTests(unittest.TestCase):
             code = textwrap.dedent("""
                 import asyncio
                 from app.system_status import readiness, operational_status
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     ready = await readiness()
@@ -68,6 +74,9 @@ class SystemStatusTests(unittest.TestCase):
             code = textwrap.dedent("""
                 import asyncio
                 from app.routers.system import system_metrics
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     body = await system_metrics()
                     assert 'mtm_uptime_seconds ' in body
@@ -96,6 +105,9 @@ class SystemStatusTests(unittest.TestCase):
             code = textwrap.dedent("""
                 import asyncio
                 from app.system_status import readiness
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     ready = await readiness()
                     assert ready['ok'] is False

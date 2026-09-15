@@ -25,6 +25,7 @@ TABLES = [
     'telegram_sessions', 'app_sessions', 'login_attempts',
     'account_status_history', 'bulk_jobs', 'bulk_job_items', 'audit_logs',
     'target_checks', 'target_check_results', 'encrypted_secrets',
+    'message_dispatch_items', 'account_proxies', 'phone_check_items', 'phone_check_accounts',
 ]
 
 

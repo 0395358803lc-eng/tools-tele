@@ -1,5 +1,10 @@
+import csv
+import io
+from collections import Counter
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -108,7 +113,66 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
         } for item in res.scalars().all()]
     out = _job_dict(job)
     out["items"] = items
+    counts = Counter(str(item.get("status") or "unknown") for item in items)
+    out["status_counts"] = dict(counts)
+    if job.type == "message_multi_send":
+        safe_retry = sum(1 for item in items if item["status"] == "pending" and item.get("error_code") == "FloodWaitError" and int(item.get("attempts") or 0) == 0)
+        delivered = int(counts.get("ok", 0))
+        out["delivery"] = {
+            "delivered": delivered, "failed": int(counts.get("failed", 0)),
+            "pending": int(counts.get("pending", 0)), "skipped": int(counts.get("skipped", 0)),
+            "attempted": sum(1 for item in items if int(item.get("attempts") or 0) > 0),
+            "safe_retry": safe_retry,
+            "delivery_rate": round((delivered / len(items)) * 100, 2) if items else 0.0,
+        }
     return out
+
+
+_EXPORT_FIELDS = [
+    "id", "account_id", "target", "status", "attempts", "error_code",
+    "error_detail", "started_at", "finished_at",
+]
+
+def _export_value(value):
+    if value is None:
+        return ""
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+@router.get("/{job_id}/export.csv")
+async def export_job_csv(job_id: str, db: AsyncSession = Depends(get_db)):
+    detail = await get_job(job_id, db)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(_EXPORT_FIELDS)
+    for item in detail.get("items", []):
+        writer.writerow([_export_value(item.get(field)) for field in _EXPORT_FIELDS])
+    data = output.getvalue().encode("utf-8-sig")
+    return StreamingResponse(io.BytesIO(data), media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="job-{job_id}.csv"'
+    })
+
+
+@router.get("/{job_id}/export.xlsx")
+async def export_job_xlsx(job_id: str, db: AsyncSession = Depends(get_db)):
+    from openpyxl import Workbook
+    detail = await get_job(job_id, db)
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("results")
+    ws.append(_EXPORT_FIELDS)
+    for item in detail.get("items", []):
+        ws.append([_export_value(item.get(field)) for field in _EXPORT_FIELDS])
+    summary = wb.create_sheet("summary")
+    summary.append(["field", "value"])
+    for field in ("id", "type", "status", "total", "success", "failed", "skipped", "pending"):
+        summary.append([field, _export_value(detail.get(field))])
+    if detail.get("delivery"):
+        for key, value in detail["delivery"].items():
+            summary.append([f"delivery.{key}", value])
+    output = io.BytesIO()
+    wb.save(output); output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={
+        "Content-Disposition": f'attachment; filename="job-{job_id}.xlsx"'
+    })
 
 
 @router.post("/{job_id}/cancel")
@@ -120,6 +184,45 @@ async def cancel_job(job_id: str, db: AsyncSession = Depends(get_db)):
     if accepted:
         await log_audit("job:cancel", detail={"job_id": job_id})
     return {"ok": accepted, "job_id": job_id, "status": "cancelling" if accepted else job.status}
+
+
+class RetryMessageIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4096)
+
+
+@router.post("/{job_id}/retry-message")
+async def retry_message_job(job_id: str, body: RetryMessageIn, db: AsyncSession = Depends(get_db)):
+    job = await db.get(BulkJob, job_id)
+    if not job or job.type != "message_multi_send":
+        raise HTTPException(404, "Không tìm thấy tác vụ gửi nhiều người nhận")
+    rows = (await db.execute(
+        select(MessageDispatchItem).where(
+            MessageDispatchItem.job_id == job_id,
+            MessageDispatchItem.status == "pending",
+            MessageDispatchItem.error_code == "FloodWaitError",
+            MessageDispatchItem.attempts == 0,
+        ).order_by(MessageDispatchItem.id)
+    )).scalars().all()
+    if not rows:
+        raise HTTPException(409, "Không có người nhận FloodWait chưa gửi nào có thể chạy lại an toàn")
+    account_ids = list(dict.fromkeys(int(r.account_id) for r in rows if r.account_id is not None))
+    accs = (await db.execute(
+        select(Account).where(Account.id.in_(account_ids), Account.deleted_at.is_(None))
+    )).scalars().all()
+    accounts = [(a.id, a.phone, (f"{a.first_name or ''} {a.last_name or ''}".strip() or a.phone)) for a in accs]
+    from ..message_dispatch import eligible_message_accounts, multi_target_message_stream, normalize_message_target
+    eligible, excluded = await eligible_message_accounts(accounts)
+    if not eligible:
+        raise HTTPException(409, "Không có tài khoản sẵn sàng để chạy lại")
+    targets = [normalize_message_target(row.target) for row in rows]
+    await log_audit("job:retry_message", detail={"source_job_id": job_id, "targets": len(targets)})
+    return StreamingResponse(
+        multi_target_message_stream(
+            eligible, targets, body.text.strip(),
+            {"retry_of": job_id, "safe_retry": "pre_send_flood_wait"},
+        ),
+        media_type="application/x-ndjson",
+    )
 
 
 @router.post("/{job_id}/retry")

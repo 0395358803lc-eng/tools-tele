@@ -41,6 +41,9 @@ class MessageDispatchTests(unittest.TestCase):
                         self.sent.append((entity, text))
                         return object()
 
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     targets = normalize_message_targets([
                         '@Alpha', 'alpha', 'https://t.me/Beta', '@beta', '+84 901 234 567'

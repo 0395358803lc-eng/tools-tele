@@ -126,6 +126,7 @@ export default function PhoneCheckTab({ accounts }) {
       if (kind === 'pause') await Endpoints.pausePhoneCheckJob(detail.id)
       if (kind === 'resume') await Endpoints.resumePhoneCheckJob(detail.id)
       if (kind === 'cancel') await Endpoints.cancelPhoneCheckJob(detail.id)
+      if (kind === 'rebalance') { const r = await Endpoints.rebalancePhoneCheckJob(detail.id); toast.info(`Đã phân phối lại ${r.moved || 0} mục`) }
       setDetail(await Endpoints.phoneCheckJob(detail.id, detailParams))
     } catch (e) { toast.error(e.message) } finally { setBusy(false) }
   }
@@ -161,6 +162,16 @@ export default function PhoneCheckTab({ accounts }) {
     if (filtered && search) q.set('q', search)
     const suffix = q.toString() ? `?${q.toString()}` : ''
     return `/api/phone-checks/jobs/${detail.id}/export.${kind}${suffix}`
+  }
+
+
+  async function downloadExport(kind, status, filtered = false) {
+    if (!detail?.id) return
+    const q = new URLSearchParams()
+    if (status) q.set('status', status)
+    if (filtered && search) q.set('q', search)
+    try { await Endpoints.downloadPhoneCheckExport(detail.id, kind, q.toString()) }
+    catch (e) { toast.error(e.message) }
   }
 
   function floodSeconds(account) {
@@ -221,7 +232,7 @@ export default function PhoneCheckTab({ accounts }) {
 
         <div className="nb-card p-4">
           {!detail ? <div className="text-sm opacity-60">Chọn một tác vụ để xem tiến độ và kết quả.</div> : <>
-            <div className="flex gap-2 items-start flex-wrap"><div><div className="font-extrabold uppercase">{detail.name}</div><div className="font-mono text-[10px] opacity-60">{detail.id}</div></div><span className={'nb-badge text-black ' + tone(detail.status)}>{detail.status}</span><div className="ml-auto flex gap-2 flex-wrap">{detail.status === 'running' || detail.status === 'queued' ? <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => action('pause')}>Tạm dừng</button> : null}{detail.status === 'paused' || detail.status === 'interrupted' ? <button className="nb-btn-pri !py-1 !px-2 text-xs" disabled={busy} onClick={() => action('resume')}>Tiếp tục</button> : null}{ACTIVE.has(detail.status) || detail.status === 'paused' ? <button className="nb-btn-err !py-1 !px-2 text-xs" disabled={busy} onClick={() => action('cancel')}>Hủy</button> : null}</div></div>
+            <div className="flex gap-2 items-start flex-wrap"><div><div className="font-extrabold uppercase">{detail.name}</div><div className="font-mono text-[10px] opacity-60">{detail.id}</div></div><span className={'nb-badge text-black ' + tone(detail.status)}>{detail.status}</span><div className="ml-auto flex gap-2 flex-wrap">{detail.status === 'running' || detail.status === 'queued' ? <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => action('pause')}>Tạm dừng</button> : null}{detail.status === 'paused' || detail.status === 'interrupted' ? <button className="nb-btn-pri !py-1 !px-2 text-xs" disabled={busy} onClick={() => action('resume')}>Tiếp tục</button> : null}{ACTIVE.has(detail.status) || detail.status === 'paused' ? <button className="nb-btn-err !py-1 !px-2 text-xs" disabled={busy} onClick={() => action('cancel')}>Hủy</button> : null}{['queued','running','paused','interrupted'].includes(detail.status) ? <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => action('rebalance')}>Phân phối lại</button> : null}</div></div>
             <div className="flex gap-2 flex-wrap mt-3 text-xs"><span className="nb-badge bg-brand-ok text-black">Tìm thấy {detail.counts?.found || 0}</span><span className="nb-badge bg-brand-warn text-black">Không thể phát hiện {detail.counts?.not_discoverable || 0}</span><span className="nb-badge bg-brand-violet text-black">Đang chờ {detail.pending || 0}</span><span className="nb-badge bg-brand-err text-black">Lỗi {(detail.counts?.permanent_error || 0) + (detail.counts?.invalid || 0)}</span></div>
             <div className="text-[11px] mt-2 opacity-70">“Không thể phát hiện” chỉ có nghĩa Telegram không trả về user cho lookup số; không khẳng định chắc chắn số đó không dùng Telegram.</div>
 
@@ -234,7 +245,7 @@ export default function PhoneCheckTab({ accounts }) {
               <label className="text-xs font-bold">Trạng thái<select className="nb-input mt-1" value={resultStatus} onChange={(e) => { setResultStatus(e.target.value); applyFilters(e.target.value) }}><option value="">Tất cả</option><option value="found">Tìm thấy</option><option value="not_discoverable">Không thể phát hiện</option><option value="invalid">Không hợp lệ</option><option value="permanent_error">Lỗi</option><option value="rate_limited">FloodWait</option><option value="in_flight_unknown">Chờ phục hồi</option></select></label>
               <label className="text-xs font-bold flex-1 min-w-44">Tìm kiếm<input className="nb-input mt-1" value={searchDraft} onChange={(e) => setSearchDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') applyFilters() }} placeholder="số, username, tên..." /></label>
               <button className="nb-btn !py-2 text-xs" onClick={() => applyFilters()}>Lọc</button>
-              <div className="ml-auto flex gap-1 flex-wrap"><a className="nb-btn !py-1 !px-2 text-xs" href={exportUrl('csv')}>CSV tất cả</a><a className="nb-btn !py-1 !px-2 text-xs" href={exportUrl('csv', 'found')}>CSV FOUND</a><a className="nb-btn !py-1 !px-2 text-xs" href={exportUrl('csv', 'not_discoverable')}>CSV NOT_DISC</a><a className="nb-btn !py-1 !px-2 text-xs" href={exportUrl('csv', resultStatus, true)}>CSV bộ lọc</a><a className="nb-btn !py-1 !px-2 text-xs" href={exportUrl('json', resultStatus, true)}>JSON bộ lọc</a></div>
+              <div className="ml-auto flex gap-1 flex-wrap"><button className="nb-btn !py-1 !px-2 text-xs" onClick={() => downloadExport('csv')}>CSV tất cả</button><button className="nb-btn !py-1 !px-2 text-xs" onClick={() => downloadExport('xlsx')}>XLSX tất cả</button><button className="nb-btn !py-1 !px-2 text-xs" onClick={() => downloadExport('csv', 'found')}>CSV FOUND</button><button className="nb-btn !py-1 !px-2 text-xs" onClick={() => downloadExport('csv', resultStatus, true)}>CSV bộ lọc</button><button className="nb-btn !py-1 !px-2 text-xs" onClick={() => downloadExport('xlsx', resultStatus, true)}>XLSX bộ lọc</button><button className="nb-btn !py-1 !px-2 text-xs" onClick={() => downloadExport('json', resultStatus, true)}>JSON bộ lọc</button></div>
             </div>
 
             <div className="overflow-auto max-h-[430px] mt-3"><table className="w-full text-xs"><thead className="text-[10px] uppercase font-extrabold border-b-2 border-black dark:border-white sticky top-0 bg-white dark:bg-zinc-900"><tr><th className="text-left p-2">Số</th><th className="text-left p-2">Kết quả</th><th className="text-left p-2">Tài khoản</th><th className="text-left p-2">Telegram</th><th className="text-left p-2">Hoạt động</th></tr></thead><tbody>{(detail.items || []).map((item) => <tr key={item.id} className="border-b border-zinc-300 dark:border-zinc-700"><td className="p-2 font-mono"><div>{item.original_phone}</div>{item.normalized_phone && item.normalized_phone !== item.original_phone && <div className="opacity-50">→ {item.normalized_phone}</div>}</td><td className="p-2"><span className={'nb-badge text-black ' + tone(item.status)}>{ITEM_VI[item.status] || item.status}</span>{item.error_detail && <div className="mt-1 opacity-60 max-w-56 truncate" title={item.error_detail}>{item.error_detail}</div>}</td><td className="p-2 font-mono">#{item.account_id ?? '—'}</td><td className="p-2">{item.status === 'found' ? <><div className="font-bold">{`${item.first_name || ''} ${item.last_name || ''}`.trim() || 'Không có tên'}</div><div className="font-mono opacity-60">{item.username ? '@' + item.username : '—'} · ID {item.telegram_user_id}</div></> : '—'}</td><td className="p-2">{item.presence || '—'}{item.last_online_at && <div className="opacity-60">{fmtTime(item.last_online_at)}</div>}</td></tr>)}</tbody></table></div>

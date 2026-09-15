@@ -18,6 +18,8 @@ from .models import BulkJob, MessageDispatchItem
 from .tg_manager import manager
 from .time_utils import utcnow
 from .utils import BulkPacer, friendly_error
+from .tenant import require_tenant_id
+from .runtime_settings import bulk_limits
 
 _PHONE_RE = re.compile(r"^\+[\d\s().-]{6,}$")
 _NUMERIC_RE = re.compile(r"^-?\d+$")
@@ -119,12 +121,15 @@ async def _resolve_entity(cli, target: str):
 async def _create_job(
     accounts: list[tuple[int, str, str]],
     targets: list[tuple[str, str]],
+    parameters_extra: dict | None = None,
 ) -> tuple[str, list[dict]]:
     job_id = uuid.uuid4().hex
     now = utcnow()
+    user_id = require_tenant_id()
     assignments: list[dict] = []
     async with AsyncSessionLocal() as db:
         db.add(BulkJob(
+            user_id=user_id,
             id=job_id,
             type="message_multi_send",
             status="running",
@@ -132,6 +137,7 @@ async def _create_job(
                 "distribution": "round_robin",
                 "target_count": len(targets),
                 "account_count": len(accounts),
+                **(parameters_extra or {}),
             },
             total=len(targets), success=0, failed=0, skipped=0, pending=0,
             created_at=now, started_at=now,
@@ -141,6 +147,7 @@ async def _create_job(
         for index, (target, key) in enumerate(targets):
             aid, phone, name = accounts[index % len(accounts)]
             item = MessageDispatchItem(
+                user_id=user_id,
                 job_id=job_id,
                 account_id=aid,
                 target=target,
@@ -206,14 +213,15 @@ async def multi_target_message_stream(
     accounts: list[tuple[int, str, str]],
     targets: list[tuple[str, str]],
     text: str,
+    parameters_extra: dict | None = None,
 ):
     """Send each unique target once, distributed across accounts, with SQL progress."""
-    job_id, assignments = await _create_job(accounts, targets)
+    job_id, assignments = await _create_job(accounts, targets, parameters_extra)
     grouped: dict[int, list[dict]] = defaultdict(list)
     for item in assignments:
         grouped[item["account_id"]].append(item)
 
-    conc = max(1, min(50, int(getattr(settings, "CONCURRENCY", 8) or 8)))
+    _, _, conc = await bulk_limits()
     sem = asyncio.Semaphore(conc)
     pacer = BulkPacer()
     out_q: asyncio.Queue = asyncio.Queue()

@@ -19,6 +19,7 @@ export default function JobsTab() {
   const [jobs, setJobs] = useState([])
   const [selected, setSelected] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [retryText, setRetryText] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -64,6 +65,30 @@ export default function JobsTab() {
     } catch (e) { toast.error(e.message) } finally { setBusy(false) }
   }
 
+  async function retryMessage(id) {
+    const text = retryText.trim()
+    if (!text) return toast.error('Nhập nội dung để chạy lại các mục chưa gửi')
+    setBusy(true)
+    let newJobId = null
+    try {
+      await Endpoints.retryMessageJob(id, text, (event) => { if (event?.job_id) newJobId = event.job_id })
+      toast.success('Đã chạy lại các mục FloodWait chưa gửi')
+      setRetryText('')
+      const list = await Endpoints.jobs(100); setJobs(list || [])
+      if (newJobId) setSelected(await Endpoints.job(newJobId))
+    } catch (e) { toast.error(e.message) } finally { setBusy(false) }
+  }
+
+  async function exportJob(kind) {
+    if (!selected?.id) return
+    setBusy(true)
+    try {
+      await Endpoints.downloadJobExport(selected.id, kind)
+      toast.success(`Đã tải ${kind.toUpperCase()} của tác vụ`)
+    } catch (e) { toast.error(e.message) }
+    finally { setBusy(false) }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -100,11 +125,31 @@ export default function JobsTab() {
           <div className="flex items-center gap-2 mb-3">
             <div><div className="font-extrabold uppercase">{jobTypeVi(selected.type)}</div><div className="text-[10px] font-mono opacity-60">{selected.id}</div></div>
             <span className={'nb-badge text-black ml-auto ' + statusClass(selected.status)}>{jobStatusVi(selected.status)}</span>
+            <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => exportJob('csv')}>CSV</button>
+            <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => exportJob('xlsx')}>XLSX</button>
             {selected.retry_supported && !ACTIVE.has(selected.status) && (selected.items || []).some((i) => RETRY_ITEMS.has(i.status)) && (
               <button className="nb-btn !py-1 !px-2 text-xs" disabled={busy} onClick={() => retry(selected.id)}>Chạy lại mục lỗi/đang chờ</button>
             )}
             <button className="nb-btn !py-1 !px-2" onClick={() => setSelected(null)}>✕</button>
           </div>
+          {selected.delivery && (
+            <div className="flex flex-wrap gap-2 mb-3 text-xs">
+              <span className="nb-badge bg-brand-ok text-black">Đã gửi {selected.delivery.delivered}</span>
+              <span className="nb-badge bg-brand-err text-black">Lỗi {selected.delivery.failed}</span>
+              <span className="nb-badge bg-brand-warn text-black">Chờ {selected.delivery.pending}</span>
+              <span className="nb-badge bg-brand-violet text-black">Đã thử {selected.delivery.attempted}</span>
+              <span className="nb-badge bg-white text-black">Tỷ lệ {selected.delivery.delivery_rate}%</span>
+              {selected.delivery.safe_retry > 0 && <span className="nb-badge bg-brand-pri text-black">Retry an toàn {selected.delivery.safe_retry}</span>}
+            </div>
+          )}
+          {selected.type === 'message_multi_send' && (selected.items || []).some((i) => i.status === 'pending' && i.error_code === 'FloodWaitError' && Number(i.attempts || 0) === 0) && (
+            <div className="nb-card-sm p-3 mb-3">
+              <div className="text-xs font-bold uppercase mb-1">Chạy lại an toàn mục chưa gửi do FloodWait</div>
+              <textarea className="nb-input min-h-20 text-sm" value={retryText} onChange={(e) => setRetryText(e.target.value)} placeholder="Nhập lại nội dung tin nhắn. Hệ thống không lưu plaintext nội dung cũ." />
+              <div className="text-[10px] opacity-60 mt-1">Chỉ retry item attempts=0; timeout hoặc trạng thái gửi không xác định sẽ không được tự động gửi lại.</div>
+              <button className="nb-btn-pri !py-1 !px-2 text-xs mt-2" disabled={busy || !retryText.trim()} onClick={() => retryMessage(selected.id)}>Chạy lại mục an toàn</button>
+            </div>
+          )}
           <div className="space-y-1 max-h-72 overflow-auto">
             {(selected.items || []).map((item) => (
               <div key={item.id} className="nb-card-sm p-2 flex gap-2 items-center text-xs">

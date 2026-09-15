@@ -6,7 +6,7 @@ export const GONE_REASON_VI = { banned: 'Bị cấm', deactivated: 'Đã vô hi�
 export const ACCOUNT_STATUS_VI = {
   connected: 'Đã kết nối', disconnected: 'Mất kết nối', connecting: 'Đang kết nối',
   flood_wait: 'Đang chờ FloodWait', banned: 'Bị cấm', error: 'Lỗi',
-  unauthorized: 'Chưa xác thực', reconnecting: 'Đang kết nối lại', removed: 'Đã xóa',
+  unauthorized: 'Chưa xác thực', auth_required: 'Cần đăng nhập lại', reconnecting: 'Đang kết nối lại', network_error: 'Lỗi mạng', proxy_error: 'Lỗi proxy', deactivated: 'Đã vô hiệu hóa', removed: 'Đã xóa',
 }
 
 export const JOB_STATUS_VI = {

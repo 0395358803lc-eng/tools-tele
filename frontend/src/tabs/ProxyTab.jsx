@@ -12,6 +12,8 @@ const EMPTY = {
   password: '',
   clear_password: false,
   rdns: true,
+  fallback_enabled: false, fallback_proxy_type: 'socks5', fallback_host: '', fallback_port: 1080,
+  fallback_username: '', fallback_password: '', clear_fallback_password: false, fallback_rdns: true,
 }
 
 function statusLabel(status) {
@@ -34,6 +36,11 @@ function fillForm(proxy) {
     password: '',
     clear_password: false,
     rdns: proxy.rdns !== false,
+    fallback_enabled: proxy.fallback?.enabled === true,
+    fallback_proxy_type: proxy.fallback?.proxy_type || 'socks5',
+    fallback_host: proxy.fallback?.host || '', fallback_port: proxy.fallback?.port || 1080,
+    fallback_username: proxy.fallback?.username || '', fallback_password: '',
+    clear_fallback_password: false, fallback_rdns: proxy.fallback?.rdns !== false,
   }
 }
 
@@ -106,8 +113,9 @@ export default function ProxyTab() {
     if (!form.host.trim()) { toast.error('Host proxy đang trống'); return null }
     setBusy('save')
     try {
-      const payload = { ...form, host: form.host.trim(), username: form.username.trim() || null }
+      const payload = { ...form, host: form.host.trim(), username: form.username.trim() || null, fallback_host: form.fallback_host.trim(), fallback_username: form.fallback_username.trim() || null }
       if (!payload.password) payload.password = null
+      if (!payload.fallback_password) payload.fallback_password = null
       const saved = await Endpoints.saveProxy(selectedId, payload)
       setForm(fillForm(saved))
       await refresh(selectedId)
@@ -122,6 +130,26 @@ export default function ProxyTab() {
     try {
       await Endpoints.testProxy(selectedId)
       toast.success('Proxy kết nối được tới Telegram')
+      await refresh(selectedId)
+    } catch (e) { toast.error(e.message); await refresh(selectedId) } finally { setBusy('') }
+  }
+
+  async function testFallback() {
+    if (!selectedId) return
+    setBusy('test-fallback')
+    try {
+      await Endpoints.testFallbackProxy(selectedId)
+      toast.success('Proxy dự phòng kết nối được tới Telegram')
+      await refresh(selectedId)
+    } catch (e) { toast.error(e.message); await refresh(selectedId) } finally { setBusy('') }
+  }
+
+  async function switchSlot(slot) {
+    if (!selectedId) return
+    setBusy('switch')
+    try {
+      await Endpoints.switchProxy(selectedId, slot)
+      toast.success(slot === 'fallback' ? 'Đã chuyển sang proxy dự phòng' : 'Đã chuyển về proxy chính')
       await refresh(selectedId)
     } catch (e) { toast.error(e.message); await refresh(selectedId) } finally { setBusy('') }
   }
@@ -241,17 +269,37 @@ export default function ProxyTab() {
               {selected.proxy?.has_password && <label className="flex gap-2 items-center"><input type="checkbox" checked={form.clear_password} onChange={(e) => setForm({ ...form, clear_password: e.target.checked, password: '' })} /> Xóa mật khẩu đã lưu</label>}
             </div>
 
+            <div className="nb-card-sm p-3 mt-4">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="text-xs font-extrabold uppercase">Proxy dự phòng</div>
+                <span className="nb-badge bg-brand-violet text-black ml-auto">Đang dùng: {selected.proxy?.active_slot || 'primary'}</span>
+                {!!selected.proxy?.failover_count && <span className="text-[10px] opacity-60">failover {selected.proxy.failover_count} lần</span>}
+              </div>
+              <label className="flex gap-2 items-center text-sm mb-3"><input type="checkbox" checked={form.fallback_enabled} onChange={(e) => setForm({ ...form, fallback_enabled: e.target.checked })} /> Bật proxy dự phòng</label>
+              {form.fallback_enabled && <div className="grid sm:grid-cols-3 gap-3">
+                <label><div className="text-xs font-bold uppercase mb-1">Loại</div><select className="nb-input" value={form.fallback_proxy_type} onChange={(e) => setForm({ ...form, fallback_proxy_type: e.target.value })}><option value="socks5">SOCKS5</option><option value="socks4">SOCKS4</option><option value="http">HTTP CONNECT</option></select></label>
+                <label><div className="text-xs font-bold uppercase mb-1">Host</div><input className="nb-input" value={form.fallback_host} onChange={(e) => setForm({ ...form, fallback_host: e.target.value })} /></label>
+                <label><div className="text-xs font-bold uppercase mb-1">Port</div><input type="number" min="1" max="65535" className="nb-input" value={form.fallback_port} onChange={(e) => setForm({ ...form, fallback_port: Number(e.target.value) || 0 })} /></label>
+                <label><div className="text-xs font-bold uppercase mb-1">Username</div><input className="nb-input" value={form.fallback_username} onChange={(e) => setForm({ ...form, fallback_username: e.target.value })} /></label>
+                <label className="sm:col-span-2"><div className="text-xs font-bold uppercase mb-1">Mật khẩu dự phòng {selected.proxy?.fallback?.has_password ? '(trống = giữ cũ)' : ''}</div><input type="password" className="nb-input" value={form.fallback_password} onChange={(e) => setForm({ ...form, fallback_password: e.target.value, clear_fallback_password: false })} /></label>
+                <label className="flex gap-2 items-center text-xs"><input type="checkbox" checked={form.fallback_rdns} onChange={(e) => setForm({ ...form, fallback_rdns: e.target.checked })} /> DNS qua proxy dự phòng</label>
+              </div>}
+            </div>
+
             <div className="flex flex-wrap gap-2 mt-5">
               <button className="nb-btn" disabled={!!busy} onClick={save}>{busy === 'save' ? 'Đang lưu…' : 'Lưu cấu hình'}</button>
-              <button className="nb-btn" disabled={!!busy || !selected.proxy} onClick={testProxy}>{busy === 'test' ? 'Đang kiểm tra…' : 'Kiểm tra proxy'}</button>
+              <button className="nb-btn" disabled={!!busy || !selected.proxy} onClick={testProxy}>{busy === 'test' ? 'Đang kiểm tra…' : 'Kiểm tra proxy chính'}</button>
+              <button className="nb-btn" disabled={!!busy || !selected.proxy?.fallback?.ready} onClick={testFallback}>{busy === 'test-fallback' ? 'Đang kiểm tra…' : 'Kiểm tra dự phòng'}</button>
               <button className="nb-btn-pri" disabled={!!busy} onClick={saveAndApply}>{busy === 'apply' ? 'Đang reconnect…' : 'Lưu & áp dụng'}</button>
+              {selected.proxy?.fallback?.ready && selected.proxy?.active_slot !== 'fallback' && <button className="nb-btn" disabled={!!busy} onClick={() => switchSlot('fallback')}>Chuyển dự phòng</button>}
+              {selected.proxy?.active_slot === 'fallback' && <button className="nb-btn" disabled={!!busy} onClick={() => switchSlot('primary')}>Về proxy chính</button>}
               {selected.proxy && <button className="nb-btn" disabled={!!busy} onClick={removeProxy}>Xóa proxy</button>}
             </div>
           </div>
 
           <div className="nb-card p-4 text-xs opacity-75 space-y-1">
             <div><b>Cách hoạt động:</b> proxy chỉ gắn với session đang chọn, không ảnh hưởng session khác.</div>
-            <div>Khi bật proxy, lần kết nối/reconnect tiếp theo của Telethon bắt buộc đi qua proxy. Nếu proxy lỗi, hệ thống không tự chuyển sang IP máy chủ.</div>
+            <div>Khi bật proxy, lần kết nối/reconnect tiếp theo của Telethon bắt buộc đi qua proxy. Nếu proxy chính lỗi mạng/kết nối, hệ thống chỉ chuyển sang proxy dự phòng đã cấu hình; không tự chuyển sang IP trực tiếp và không dùng failover để né FloodWait.</div>
             <div>SOCKS5 được khuyến nghị. HTTP phải hỗ trợ phương thức CONNECT; HTTP proxy chỉ hỗ trợ web thông thường có thể không dùng được với Telegram.</div>
           </div>
         </>}

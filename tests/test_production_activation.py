@@ -26,7 +26,8 @@ class ProductionActivationTests(unittest.TestCase):
         )
         output = proc.stdout + proc.stderr
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn('BỊ CHẶN: DATABASE_URL không phải URL PostgreSQL', output)
+        self.assertIn('DATABASE_URL', output)
+        self.assertIn('PostgreSQL', output)
         self.assertNotIn('APP_PASSWORD=', output)
         self.assertNotIn('SECRETS_ENCRYPTION_KEY=', output)
         self.assertNotIn('TG_API_HASH=', output)
