@@ -44,3 +44,12 @@ Never restore `.env` from an archive; runtime secrets are managed separately.
 - Source identity: Git commit SHA from `/api/health`.
 - Schema identity: Alembic revision from `/api/health`.
 - Build timestamp: frontend static build timestamp.
+
+## Branch policy
+
+- `main`: last reviewed production line.
+- `production/*`: release candidates and production baseline work.
+- `develop` / feature branches: normal development.
+- Do not force-push `main` or a production tag.
+- Merge to `main` only after CI, backup, strict preflight and production acceptance pass.
+- Dependency updates should arrive through Dependabot pull requests and pass the same CI gate.
