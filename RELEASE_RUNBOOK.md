@@ -53,3 +53,16 @@ Never restore `.env` from an archive; runtime secrets are managed separately.
 - Do not force-push `main` or a production tag.
 - Merge to `main` only after CI, backup, strict preflight and production acceptance pass.
 - Dependency updates should arrive through Dependabot pull requests and pass the same CI gate.
+
+## Windows unattended startup
+
+For production, install the MTM scheduled tasks under the Windows `SYSTEM` account so the app starts before an interactive user signs in.
+
+1. Run `install-system-tasks.bat` and approve the Windows UAC prompt.
+2. The installer stages an isolated ngrok runtime under ignored `runtime/ngrok/` and restricts its ACL.
+3. `MTM_Backend` and `MTM_Ngrok` use boot triggers; ngrok waits for backend readiness before opening the tunnel.
+4. `MTM_Watchdog` runs every two minutes and uses a restart circuit breaker (3 attempts per 15 minutes).
+5. Daily backup and maintenance tasks also run as `SYSTEM`.
+6. Run `scripts/verify_windows_boot_mode.py` after installation and after a cold boot.
+
+The legacy per-user Startup shortcut is removed by the SYSTEM installer to prevent duplicate processes.
