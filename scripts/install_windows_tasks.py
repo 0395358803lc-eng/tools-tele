@@ -52,9 +52,9 @@ def find_ngrok_source() -> tuple[Path, Path]:
         "ngrok" / "ngrok.yml"
     )
     if not exe.is_file():
-        raise FileNotFoundError(f"Không tìm thấy ngrok.exe: {exe}")
+        raise FileNotFoundError(f"KhÃ´ng tÃ¬m tháº¥y ngrok.exe: {exe}")
     if not cfg.is_file():
-        raise FileNotFoundError(f"Không tìm thấy cấu hình ngrok: {cfg}")
+        raise FileNotFoundError(f"KhÃ´ng tÃ¬m tháº¥y cáº¥u hÃ¬nh ngrok: {cfg}")
     return exe, cfg
 
 
@@ -69,8 +69,8 @@ def copy_if_changed(src: Path, dst: Path) -> bool:
     except PermissionError as exc:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(
-            f"{dst.name} đang được sử dụng và khác bản nguồn; "
-            "dừng MTM_Ngrok rồi chạy lại installer"
+            f"{dst.name} Ä‘ang Ä‘Æ°á»£c sá»­ dá»¥ng vÃ  khÃ¡c báº£n nguá»“n; "
+            "dá»«ng MTM_Ngrok rá»“i cháº¡y láº¡i installer"
         ) from exc
     return True
 
@@ -133,7 +133,7 @@ def verify_system_task(name: str) -> None:
         xml = raw.decode("utf-8-sig", errors="replace")
     compact = xml.upper()
     if "S-1-5-18" not in compact and ">SYSTEM<" not in compact:
-        raise RuntimeError(f"Task {name} chưa chạy bằng SYSTEM")
+        raise RuntimeError(f"Task {name} chÆ°a cháº¡y báº±ng SYSTEM")
     print(f"SYSTEM_TASK_OK={name}")
 
 
@@ -151,7 +151,7 @@ def remove_legacy_autostart() -> None:
 def install_system_tasks() -> None:
     if not is_admin():
         raise PermissionError(
-            "Cần chạy installer bằng Run as administrator để tạo task SYSTEM"
+            "Cáº§n cháº¡y installer báº±ng Run as administrator Ä‘á»ƒ táº¡o task SYSTEM"
         )
     exe, cfg = prepare_ngrok_runtime()
     secure_runtime_acl()
@@ -174,6 +174,7 @@ def install_system_tasks() -> None:
     for name, action, schedule, restart_count in specs:
         create(name, action, schedule)
         harden(name, restart_count)
+    subprocess.run([SCHTASKS, "/Delete", "/TN", "MTM_GracefulStop", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     remove_legacy_autostart()
     for name, _action, _schedule, _restart_count in specs:
         verify_system_task(name)
@@ -194,7 +195,7 @@ def main() -> None:
     if args.apply_system:
         install_system_tasks()
         return
-    parser.error("Chọn --prepare-ngrok hoặc --apply-system")
+    parser.error("Chá»n --prepare-ngrok hoáº·c --apply-system")
 
 
 if __name__ == "__main__":

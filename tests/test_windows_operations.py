@@ -67,7 +67,7 @@ class WindowsOperationsTests(unittest.TestCase):
         self.assertIn("MTM_Backend", start)
         self.assertIn("MTM_Ngrok", start)
         self.assertIn(".maintenance", stop)
-        self.assertIn("graceful_stop.py", stop)
+        self.assertIn("Verb RunAs", stop)
         self.assertIn("MTM_Backend", stop)
 
     def test_copy_if_changed_is_idempotent(self):
@@ -83,6 +83,7 @@ class WindowsOperationsTests(unittest.TestCase):
             src.write_bytes(b"changed")
             self.assertTrue(iwt.copy_if_changed(src, dst))
             self.assertEqual(dst.read_bytes(), b"changed")
+
     def test_task_installer_contract(self):
         src = (ROOT / "scripts" / "install_windows_tasks.py").read_text(encoding="utf-8")
         for name in ("MTM_Backend", "MTM_Ngrok", "MTM_Watchdog", "MTM_Backup"):
