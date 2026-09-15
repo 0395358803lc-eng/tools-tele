@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { lazy, Suspense, useEffect, useState, useRef, useCallback } from 'react'
 import { Endpoints, onUnauthorized } from './lib/api'
 import { useToast } from './lib/toast.jsx'
 import { useTheme } from './lib/theme'
@@ -6,21 +6,24 @@ import { ensureNotificationPermission, desktopNotify } from './lib/util'
 import LoginScreen from './components/LoginScreen.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import TopStats from './components/TopStats.jsx'
-import AddAccountModal from './components/AddAccountModal.jsx'
-import DashboardTab from './tabs/DashboardTab.jsx'
-import ProfileTab from './tabs/ProfileTab.jsx'
-import SecurityTab from './tabs/SecurityTab.jsx'
-import GroupsTab from './tabs/GroupsTab.jsx'
-import MessagingTab from './tabs/MessagingTab.jsx'
-import InboxTab from './tabs/InboxTab.jsx'
-import ProxyTab from './tabs/ProxyTab.jsx'
-import TargetCheckTab from './tabs/TargetCheckTab.jsx'
-import PhoneCheckTab from './tabs/PhoneCheckTab.jsx'
-import BulkTab from './tabs/BulkTab.jsx'
-import SettingsTab from './tabs/SettingsTab.jsx'
-import JobsTab from './tabs/JobsTab.jsx'
-import AuditTab from './tabs/AuditTab.jsx'
-import SystemTab from './tabs/SystemTab.jsx'
+import { signOutIdentity } from './lib/supabase'
+
+const AddAccountModal = lazy(() => import('./components/AddAccountModal.jsx'))
+const AdminPage = lazy(() => import('./components/AdminPage.jsx'))
+const DashboardTab = lazy(() => import('./tabs/DashboardTab.jsx'))
+const ProfileTab = lazy(() => import('./tabs/ProfileTab.jsx'))
+const SecurityTab = lazy(() => import('./tabs/SecurityTab.jsx'))
+const GroupsTab = lazy(() => import('./tabs/GroupsTab.jsx'))
+const MessagingTab = lazy(() => import('./tabs/MessagingTab.jsx'))
+const InboxTab = lazy(() => import('./tabs/InboxTab.jsx'))
+const ProxyTab = lazy(() => import('./tabs/ProxyTab.jsx'))
+const TargetCheckTab = lazy(() => import('./tabs/TargetCheckTab.jsx'))
+const PhoneCheckTab = lazy(() => import('./tabs/PhoneCheckTab.jsx'))
+const BulkTab = lazy(() => import('./tabs/BulkTab.jsx'))
+const SettingsTab = lazy(() => import('./tabs/SettingsTab.jsx'))
+const JobsTab = lazy(() => import('./tabs/JobsTab.jsx'))
+const AuditTab = lazy(() => import('./tabs/AuditTab.jsx'))
+const SystemTab = lazy(() => import('./tabs/SystemTab.jsx'))
 
 const TABS = [
   { id: 'dashboard', label: 'Tổng quan' },
@@ -43,6 +46,7 @@ export default function App() {
   const toast = useToast()
   const { theme, toggle } = useTheme()
   const [authState, setAuthState] = useState('checking') // checking | in | out
+  const [currentUser, setCurrentUser] = useState(null)
   const [accounts, setAccounts] = useState([])
   const [gone, setGone] = useState([])  // banned/removed account history
   const [stats, setStats] = useState({ total: 0, connected: 0, banned: 0, with_2fa: 0, unread_security: 0 })
@@ -56,19 +60,22 @@ export default function App() {
   // initial auth check
   useEffect(() => {
     Endpoints.me()
-      .then((r) => setAuthState(r?.authed ? 'in' : 'out'))
-      .catch(() => setAuthState('out'))
+      .then((r) => { setCurrentUser(r?.user || null); setAuthState(r?.authed ? 'in' : 'out') })
+      .catch(() => { setCurrentUser(null); setAuthState('out') })
   }, [])
 
   // global 401 handler: kick back to login
   useEffect(() => onUnauthorized(() => {
     setAuthState('out')
+    setCurrentUser(null)
     setAccounts([]); setGone([]); setSelectedId(null)
   }), [])
 
   async function logout() {
     try { await Endpoints.logout() } catch {}
+    try { await signOutIdentity() } catch {}
     setAuthState('out')
+    setCurrentUser(null)
     setAccounts([]); setGone([]); setSelectedId(null)
     prevUnreadRef.current = 0
   }
@@ -130,7 +137,21 @@ export default function App() {
     )
   }
   if (authState === 'out') {
-    return <LoginScreen onAuthed={() => setAuthState('in')} />
+    return <LoginScreen onAuthed={async () => {
+      try {
+        const r = await Endpoints.me()
+        setCurrentUser(r?.user || null)
+        setAuthState(r?.authed ? 'in' : 'out')
+      } catch { setAuthState('out') }
+    }} />
+  }
+
+  const adminRoute = window.location.pathname.startsWith('/admin')
+  if (adminRoute) {
+    if (currentUser?.role !== 'admin') {
+      return <div className="min-h-screen flex items-center justify-center"><div className="nb-card p-6"><b>403 — Yêu cầu quyền ADMIN</b><br/><button className="nb-btn mt-3" onClick={() => { window.location.href = '/' }}>Quay lại</button></div></div>
+    }
+    return <Suspense fallback={<LazyFallback />}><AdminPage currentUser={currentUser} onBack={() => { window.location.href = '/' }} onLogout={logout} /></Suspense>
   }
 
   const selected = accounts.find((a) => a.id === selectedId) || null
@@ -143,6 +164,10 @@ export default function App() {
         </button>
         <h1 className="font-extrabold text-xl uppercase tracking-tighter">Quản Lý Telegram Đa Tài Khoản</h1>
         <div className="flex-1" />
+        <span className="text-xs font-bold hidden md:inline">{currentUser?.username}</span>
+        {currentUser?.role === 'admin' && (
+          <button onClick={() => { window.location.href = '/admin' }} className="nb-btn !bg-white !text-black !py-1 !px-2">ADMIN</button>
+        )}
         <TopStats stats={stats} onBellClick={() => setTab('security')} />
         <button onClick={toggle} className="nb-btn !bg-white !text-black !py-1 !px-2" title="Đổi giao diện">
           {theme === 'dark' ? '☀' : '☾'}
@@ -178,6 +203,7 @@ export default function App() {
             ))}
           </nav>
           <div className="flex-1 min-h-0 overflow-auto p-4">
+            <Suspense fallback={<LazyFallback />}>
             {tab === 'dashboard' && <DashboardTab stats={stats} accounts={accounts} onSelect={(id) => { setSelectedId(id); setTab('profile') }} onChange={() => { refreshStats(); refreshAccounts() }} />}
             {tab === 'profile'   && <ProfileTab account={selected} onRefresh={refreshAccounts} />}
             {tab === 'security'  && <SecurityTab accounts={accounts} onChange={refreshStats} />}
@@ -192,17 +218,24 @@ export default function App() {
             {tab === 'audit'     && <AuditTab />}
             {tab === 'system'    && <SystemTab />}
             {tab === 'settings'  && <SettingsTab />}
+            </Suspense>
           </div>
         </main>
       </div>
 
       {addOpen && (
+        <Suspense fallback={<LazyFallback />}>
         <AddAccountModal
           onClose={() => setAddOpen(false)}
           onAdded={() => { setAddOpen(false); refreshAccounts(); refreshStats() }}
           onImported={() => { refreshAccounts(); refreshStats() }}
         />
+        </Suspense>
       )}
     </div>
   )
+}
+
+function LazyFallback() {
+  return <div className="nb-card-sm p-4 font-bold uppercase tracking-tight">Đang tải mô-đun…</div>
 }

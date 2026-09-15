@@ -1,21 +1,78 @@
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import DeclarativeBase, Session, with_loader_criteria
+from sqlalchemy.sql.dml import Delete, Update
 
 from .config import settings
+from .tenant import current_tenant_id, in_system_scope
 
 
 class Base(DeclarativeBase):
     pass
 
 
+def _tenant_models():
+    from .models import TENANT_MODELS, TENANT_TABLE_NAMES
+    return TENANT_MODELS, TENANT_TABLE_NAMES
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _tenant_orm_execute(state):
+    uid = current_tenant_id()
+    if not uid or in_system_scope() or state.execution_options.get("tenant_bypass"):
+        return
+    models, table_names = _tenant_models()
+    statement = state.statement
+    if state.is_select:
+        for model in models:
+            statement = statement.options(
+                with_loader_criteria(
+                    model,
+                    lambda cls: cls.user_id == uid,
+                    include_aliases=True,
+                )
+            )
+    elif state.is_update or state.is_delete:
+        table = getattr(statement, "table", None)
+        if table is not None and table.name in table_names and "user_id" in table.c:
+            statement = statement.where(table.c.user_id == uid)
+    state.statement = statement
+
+@event.listens_for(Session, "before_flush")
+def _tenant_before_flush(session, flush_context, instances):
+    uid = current_tenant_id()
+    if not uid or in_system_scope():
+        return
+    for obj in list(session.new) + list(session.dirty) + list(session.deleted):
+        if not hasattr(obj, "user_id"):
+            continue
+        owner = getattr(obj, "user_id", None)
+        if obj in session.new and not owner:
+            setattr(obj, "user_id", uid)
+            continue
+        if str(owner or "") != uid:
+            raise PermissionError("Cross-tenant ORM write blocked")
+
+
 _database_url = settings.database_url
 _is_sqlite = _database_url.startswith("sqlite")
 
-_engine_kwargs = {
-    "echo": False,
-    "future": True,
-}
+
+def _validate_connection_mode() -> None:
+    if _is_sqlite or not settings.ENFORCE_SINGLE_INSTANCE:
+        return
+    url = make_url(_database_url)
+    host = (url.host or "").lower()
+    if host.endswith(".pooler.supabase.com") and url.port == 6543:
+        raise RuntimeError(
+            "Supabase Transaction pooler (6543) is not supported because "
+            "session-level advisory locks are required. Use Session pooler port 5432."
+        )
+
+
+_validate_connection_mode()
+_engine_kwargs = {"echo": False, "future": True}
 if _is_sqlite:
     _engine_kwargs["connect_args"] = {"timeout": 30}
 else:
@@ -42,14 +99,11 @@ if _is_sqlite:
         cur.close()
 
 
-
-
 _INSTANCE_LOCK_ID = 77177364013717
 _instance_lock_conn = None
 
 
 async def acquire_instance_lock() -> bool:
-    """Hold a PostgreSQL advisory lock for the lifetime of this app process."""
     global _instance_lock_conn
     if _is_sqlite or not settings.ENFORCE_SINGLE_INSTANCE:
         return True
@@ -58,14 +112,10 @@ async def acquire_instance_lock() -> bool:
     conn = await engine.connect()
     try:
         acquired = bool(await conn.scalar(
-            text("SELECT pg_try_advisory_lock(:key)"),
-            {"key": _INSTANCE_LOCK_ID},
+            text("SELECT pg_try_advisory_lock(:key)"), {"key": _INSTANCE_LOCK_ID}
         ))
         if not acquired:
-            raise RuntimeError(
-                "Another Multi TG Manager instance already holds the production database lock. "
-                "Use exactly one application replica for this account set."
-            )
+            raise RuntimeError("Another Multi TG Manager instance already holds the database lock")
         _instance_lock_conn = conn
         return True
     except Exception:
@@ -80,16 +130,12 @@ async def release_instance_lock() -> None:
     if conn is None:
         return
     try:
-        await conn.execute(
-            text("SELECT pg_advisory_unlock(:key)"),
-            {"key": _INSTANCE_LOCK_ID},
-        )
+        await conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _INSTANCE_LOCK_ID})
     finally:
         await conn.close()
 
 
 async def init_db():
-    """Validate database connectivity only. Schema ownership belongs to Alembic."""
     await check_db()
 
 

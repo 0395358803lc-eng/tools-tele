@@ -20,7 +20,7 @@ from .phone_check_runner import phone_check_runner
 from . import secrets_store
 from .auth import router as auth_router, require_auth, cleanup_auth_state
 from .security_middleware import BrowserSecurityMiddleware
-from .routers import accounts, profile, security, groups, messaging, inbox, proxies, phone_checks, settings as settings_router, bulk, jobs, audit, system
+from .routers import accounts, profile, security, groups, messaging, inbox, proxies, phone_checks, settings as settings_router, bulk, jobs, audit, system, admin
 
 configure_logging()
 log = logging.getLogger("main")
@@ -28,11 +28,11 @@ log = logging.getLogger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # validate critical env
-    if not settings.APP_PASSWORD:
-        log.warning("APP_PASSWORD is empty — set it in backend/.env!")
-    if not settings.SECRETS_ENCRYPTION_KEY:
-        log.warning("SECRETS_ENCRYPTION_KEY is empty — encrypted SQL sessions cannot be persisted")
+    if not settings.SUPABASE_URL or not settings.SUPABASE_PUBLISHABLE_KEY or not settings.SUPABASE_SECRET_KEY:
+        log.warning("Supabase Identity chưa được cấu hình đầy đủ")
+
+    if settings.NODE_ENV.strip().lower() == "production" and not settings.database_url.startswith("postgresql"):
+        raise RuntimeError("Production requires PostgreSQL; SQLite is development/test only")
 
     await init_db()
     await acquire_instance_lock()
@@ -43,9 +43,6 @@ async def lifespan(app: FastAPI):
             migrated_secrets = await secrets_store.migrate_legacy_to_db()
             if migrated_secrets:
                 log.info("Migrated %d legacy encrypted secret(s) into SQL", migrated_secrets)
-            loaded_api = await secrets_store.load_telegram_api_config()
-            if loaded_api:
-                log.info("Loaded encrypted Telegram API configuration from SQL")
         except Exception as exc:
             log.warning("Encrypted runtime secret loading skipped: %s", exc)
         recovered = await recover_interrupted_jobs()
@@ -83,7 +80,7 @@ app = FastAPI(title="Multi TG Manager", lifespan=lifespan)
 app.add_middleware(BrowserSecurityMiddleware)
 
 cors_origins = [o.strip() for o in (settings.ALLOWED_ORIGIN or "").split(",") if o.strip()]
-if os.environ.get("NODE_ENV", "").strip().lower() != "production":
+if settings.NODE_ENV.strip().lower() != "production":
     cors_origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
 
 app.add_middleware(
@@ -96,6 +93,7 @@ app.add_middleware(
 
 # auth endpoints (public)
 app.include_router(auth_router)
+app.include_router(admin.router)
 
 
 @app.get("/api/health/live")

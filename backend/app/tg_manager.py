@@ -35,6 +35,8 @@ from . import secrets_store
 from . import telegram_session_store
 from . import proxy_store
 from .telegram_errors import classify_error
+from .tenant import current_tenant_id, tenant_scope, system_scope
+from .runtime_settings import auto_reconnect_enabled
 
 log = logging.getLogger("tg_manager")
 
@@ -55,6 +57,7 @@ async def record_gone_account(db, acc: Account, reason: str):
     except ValueError:
         serial = len(ids) + 1
     db.add(GoneAccount(
+        user_id=acc.user_id,
         account_id=acc.id,
         tg_user_id=acc.tg_user_id,
         phone=acc.phone,
@@ -83,6 +86,7 @@ def classify_777000(text: str) -> str:
 class TgClientManager:
     def __init__(self):
         self._clients: dict[int, TelegramClient] = {}  # account_id -> client
+        self._owners: dict[int, str] = {}  # account_id -> Supabase user UUID
         self._pending: dict[str, dict] = {}  # phone -> {'client', 'phone_code_hash', 'needs_2fa'}
         self._qr_pending: dict[str, dict] = {}  # qr_id -> {'client', 'qr_login', 'wait_task', 'needs_2fa', 'session_path'}
         # Per-account locks so two calls can't start/stop the SAME account at
@@ -170,9 +174,28 @@ class TgClientManager:
         return self._operation_owners.get(account_id)
 
     # ---------- helpers ----------
-    def _session_path(self, phone: str) -> str:
+    def _tenant_id(self, user_id: str | None = None) -> str:
+        uid = str(user_id or current_tenant_id() or "").strip()
+        if not uid:
+            raise RuntimeError("Thiếu tenant context cho Telegram")
+        return uid
+
+    def _tenant_dir(self, user_id: str | None = None) -> Path:
+        uid = self._tenant_id(user_id)
+        path = settings.sessions_path / f"user_{uid}"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def _api_credentials(self, user_id: str | None = None) -> tuple[int, str]:
+        uid = self._tenant_id(user_id)
+        cfg = await secrets_store.get_telegram_api_config(uid)
+        if not cfg:
+            raise RuntimeError("Chưa cấu hình Telegram API cho user này")
+        return cfg
+
+    def _session_path(self, phone: str, user_id: str | None = None) -> str:
         safe = re.sub(r"[^0-9]", "", phone)
-        return str(settings.sessions_path / f"acc_{safe}")
+        return str(self._tenant_dir(user_id) / f"acc_{safe}")
 
     @staticmethod
     def _phone_file_part(phone: str) -> str:
@@ -191,24 +214,27 @@ class TgClientManager:
     def session_file_name(self, phone: str, username: str | None = None, user_id: int | None = None) -> str:
         return f"{self._username_file_part(username, user_id)}_{self._phone_file_part(phone)}"
 
-    def _desired_session_path(self, phone: str, username: str | None = None, user_id: int | None = None) -> str:
-        return str(settings.sessions_path / self.session_file_name(phone, username, user_id))
+    def _desired_session_path(
+        self, phone: str, username: str | None = None, telegram_user_id: int | None = None,
+        owner_id: str | None = None,
+    ) -> str:
+        return str(self._tenant_dir(owner_id) / self.session_file_name(phone, username, telegram_user_id))
 
-    def _path_from_session_file(self, session_file: str) -> str:
+    def _path_from_session_file(self, session_file: str, owner_id: str | None = None) -> str:
         p = Path(session_file or "")
         if p.suffix == ".session":
             p = p.with_suffix("")
         if p.is_absolute():
             return str(p)
-        return str(settings.sessions_path / p.name)
+        return str(self._tenant_dir(owner_id) / p.name)
 
     def _session_path_candidates(self, acc: Account) -> list[str]:
         candidates = []
         if acc.session_file:
-            candidates.append(self._path_from_session_file(acc.session_file))
-        candidates.append(self._desired_session_path(acc.phone, acc.username, acc.tg_user_id))
-        candidates.append(self._path_from_session_file(f"acc_{acc.phone}"))
-        candidates.append(self._session_path(acc.phone))
+            candidates.append(self._path_from_session_file(acc.session_file, acc.user_id))
+        candidates.append(self._desired_session_path(acc.phone, acc.username, acc.tg_user_id, acc.user_id))
+        candidates.append(self._path_from_session_file(f"acc_{acc.phone}", acc.user_id))
+        candidates.append(self._session_path(acc.phone, acc.user_id))
 
         unique = []
         seen = set()
@@ -250,8 +276,9 @@ class TgClientManager:
             self._safe_unlink(base + suffix)
 
     async def promote_phone_session(self, phone: str, me: TgUser) -> str:
-        dst = self._desired_session_path(phone, getattr(me, "username", None), getattr(me, "id", None))
-        self._move_session_files(self._session_path(phone), dst)
+        uid = self._tenant_id()
+        dst = self._desired_session_path(phone, getattr(me, "username", None), getattr(me, "id", None), uid)
+        self._move_session_files(self._session_path(phone, uid), dst)
         return Path(dst).name
 
     async def inspect_imported_session(self, session_base: str) -> tuple[TgUser, str]:
@@ -259,7 +286,8 @@ class TgClientManager:
 
         The caller owns moving or deleting the session files after this returns.
         """
-        cli = TelegramClient(session_base, settings.TG_API_ID, settings.TG_API_HASH)
+        api_id, api_hash = await self._api_credentials()
+        cli = TelegramClient(session_base, api_id, api_hash)
         try:
             await asyncio.wait_for(cli.connect(), timeout=20)
             if not await asyncio.wait_for(cli.is_user_authorized(), timeout=20):
@@ -283,7 +311,8 @@ class TgClientManager:
                 pass
 
     async def promote_imported_session(self, session_base: str, phone: str, me: TgUser) -> str:
-        dst = self._desired_session_path(phone, getattr(me, "username", None), getattr(me, "id", None))
+        uid = self._tenant_id()
+        dst = self._desired_session_path(phone, getattr(me, "username", None), getattr(me, "id", None), uid)
         self._move_session_files(session_base, dst)
         if not Path(dst + ".session").exists():
             raise RuntimeError("Không thể lưu tệp phiên đã nhập")
@@ -310,9 +339,12 @@ class TgClientManager:
         not create a new Telegram auth key; it only reuses session files that are
         already authorized.
         """
+        uid = current_tenant_id()
+        if not uid:
+            return {"ok": True, "total": 0, "success": 0, "failed": 0, "skipped": 0, "results": []}
         async with self._session_scan_lock:
             session_files = [
-                p for p in sorted(settings.sessions_path.glob("*.session"))
+                p for p in sorted(self._tenant_dir(uid).glob("*.session"))
                 if self._is_importable_session_file(p)
             ]
 
@@ -438,10 +470,16 @@ class TgClientManager:
             }
 
     def get(self, account_id: int) -> Optional[TelegramClient]:
+        uid = current_tenant_id()
+        if uid and self._owners.get(account_id) not in {None, uid}:
+            return None
         return self._clients.get(account_id)
 
     async def all_clients(self) -> dict[int, TelegramClient]:
-        return dict(self._clients)
+        uid = current_tenant_id()
+        if not uid:
+            return dict(self._clients)
+        return {aid: cli for aid, cli in self._clients.items() if self._owners.get(aid) == uid}
 
     # ---------- lifecycle ----------
     async def startup_load_all(self):
@@ -498,6 +536,7 @@ class TgClientManager:
             try: await qr['client'].disconnect()
             except Exception: pass
         self._clients.clear()
+        self._owners.clear()
         self._pending.clear()
         self._qr_pending.clear()
         self._reconnect_failures.clear()
@@ -510,88 +549,114 @@ class TgClientManager:
                 return self._clients[acc.id]
             stored_session = None
             try:
-                stored_session = await telegram_session_store.load(acc.id)
+                stored_session = await telegram_session_store.load(acc.id, acc.user_id)
             except Exception as exc:
                 log.warning("encrypted session load failed for %s: %s", acc.phone, exc)
-            session_backend = StringSession(stored_session) if stored_session else self._session_path_for_account(acc)
+
             try:
-                account_proxy = await proxy_store.runtime_proxy(acc.id)
+                proxy_row = await proxy_store.get_row(acc.id)
             except Exception as exc:
                 await proxy_store.mark_proxy_status(acc.id, "config_failed", str(exc))
-                await self._set_status(acc.id, "disconnected", "Không thể đọc cấu hình proxy")
+                await self._set_status(acc.id, "proxy_error", "Không thể đọc cấu hình proxy")
                 raise
-            cli = TelegramClient(
-                session_backend, settings.TG_API_ID, settings.TG_API_HASH,
-                proxy=account_proxy,
-            )
-            await self._set_status(acc.id, "connecting")
-            try:
-                await asyncio.wait_for(cli.connect(), timeout=20)
-                authorized = await asyncio.wait_for(cli.is_user_authorized(), timeout=20)
-                if not authorized:
-                    await cli.disconnect()
-                    await self._set_status(acc.id, "auth_required", "Phiên Telegram chưa được xác thực")
-                    raise RuntimeError("not authorized")
+            active_slot = (getattr(proxy_row, "active_slot", None) or "primary") if proxy_row else None
+            slots = [active_slot] if proxy_row and proxy_row.enabled else [None]
+            if active_slot == "primary" and proxy_store.has_fallback(proxy_row):
+                slots.append("fallback")
+            api_id, api_hash = await self._api_credentials(acc.user_id)
 
-                self._clients[acc.id] = cli
-                self._clear_reconnect_backoff(acc.id)
-                self._attach_listener(acc.id, cli)
-                await self._set_status(acc.id, "connected")
-                if account_proxy:
-                    await proxy_store.mark_proxy_status(acc.id, "connected")
-                try:
-                    await telegram_session_store.save(acc.id, cli, acc.session_file)
-                except Exception as exc:
-                    log.warning("encrypted session save failed for %s: %s", acc.phone, exc)
+            def make_session():
+                return StringSession(stored_session) if stored_session else self._session_path_for_account(acc)
 
+            for index, slot in enumerate(slots):
+                account_proxy = proxy_store.runtime_proxy_from_row(proxy_row, slot) if proxy_row else None
+                cli = TelegramClient(make_session(), api_id, api_hash, proxy=account_proxy)
+                await self._set_status(acc.id, "connecting")
                 try:
-                    me = await asyncio.wait_for(cli.get_me(), timeout=20)
-                    await self._sync_profile(acc.id, me)
-                except Exception as exc:
-                    await self.mark_operation_error(acc.id, exc)
+                    await asyncio.wait_for(cli.connect(), timeout=20)
+                    authorized = await asyncio.wait_for(cli.is_user_authorized(), timeout=20)
+                    if not authorized:
+                        await cli.disconnect()
+                        await self._set_status(acc.id, "auth_required", "Phiên Telegram chưa được xác thực")
+                        raise RuntimeError("not authorized")
 
-                try:
-                    await asyncio.wait_for(self._backfill_777000(acc.id, cli, limit=50), timeout=45)
+                    if slot == "fallback" and active_slot != "fallback":
+                        await proxy_store.set_active_slot(acc.id, "fallback", failover=True)
+                        await proxy_store.mark_proxy_status(acc.id, "failover_connected")
+                    self._clients[acc.id] = cli
+                    self._owners[acc.id] = acc.user_id
+                    self._clear_reconnect_backoff(acc.id)
+                    self._attach_listener(acc.id, cli)
+                    await self._set_status(acc.id, "connected")
+                    if account_proxy:
+                        await proxy_store.mark_proxy_status(acc.id, "connected")
+                    try:
+                        await telegram_session_store.save(acc.id, cli, acc.session_file, acc.user_id)
+                    except Exception as exc:
+                        log.warning("encrypted session save failed for %s: %s", acc.phone, exc)
+                    try:
+                        me = await asyncio.wait_for(cli.get_me(), timeout=20)
+                        await self._sync_profile(acc.id, me)
+                    except Exception as exc:
+                        await self.mark_operation_error(acc.id, exc)
+                    try:
+                        await asyncio.wait_for(self._backfill_777000(acc.id, cli, limit=50), timeout=45)
+                    except Exception as exc:
+                        log.warning("backfill 777000 for %s: %s", acc.phone, exc)
+                    return cli
+                except UserDeactivatedBanError:
+                    try: await cli.disconnect()
+                    except Exception: pass
+                    await self._mark_banned(acc.id)
+                    await telegram_session_store.clear(acc.id, acc.user_id)
+                    raise
+                except UserDeactivatedError:
+                    try: await cli.disconnect()
+                    except Exception: pass
+                    await self._mark_deactivated(acc.id)
+                    await telegram_session_store.clear(acc.id, acc.user_id)
+                    raise
+                except AuthKeyUnregisteredError as exc:
+                    try:
+                        await cli.disconnect()
+                    except Exception:
+                        pass
+                    await self._set_status(acc.id, "auth_required", str(exc)[:500])
+                    await telegram_session_store.clear(acc.id, acc.user_id)
+                    raise
                 except Exception as exc:
-                    log.warning("backfill 777000 for %s: %s", acc.phone, exc)
-                return cli
-            except (UserDeactivatedBanError, UserDeactivatedError):
-                try:
-                    await cli.disconnect()
-                except Exception:
-                    pass
-                await self._mark_banned(acc.id)
-                await telegram_session_store.clear(acc.id)
-                raise
-            except AuthKeyUnregisteredError as exc:
-                try:
-                    await cli.disconnect()
-                except Exception:
-                    pass
-                await self._set_status(acc.id, "auth_required", str(exc)[:500])
-                await telegram_session_store.clear(acc.id)
-                raise
-            except Exception as exc:
-                try:
-                    await cli.disconnect()
-                except Exception:
-                    pass
-                if account_proxy:
-                    await proxy_store.mark_proxy_status(acc.id, "connect_failed", str(exc))
-                # Preserve an explicit auth_required state set above.
-                if str(exc) != "not authorized":
-                    await self.mark_operation_error(acc.id, exc)
-                raise
+                    try:
+                        await cli.disconnect()
+                    except Exception:
+                        pass
+                    info = classify_error(exc)
+                    proxy_failure = bool(account_proxy) and (
+                        (info.retryable and info.category != "flood_wait") or "proxy" in type(exc).__name__.lower()
+                        or "socks" in type(exc).__name__.lower()
+                    )
+                    can_failover = slot == "primary" and index + 1 < len(slots) and proxy_failure
+                    if can_failover:
+                        await proxy_store.mark_proxy_status(acc.id, "primary_failed", str(exc))
+                        await self._set_status(acc.id, "proxy_error", "Proxy chính lỗi; đang chuyển sang proxy dự phòng")
+                        continue
+                    if account_proxy:
+                        await proxy_store.mark_proxy_status(acc.id, "connect_failed", str(exc))
+                    if proxy_failure:
+                        await self._set_status(acc.id, "proxy_error", str(exc)[:500])
+                    elif str(exc) != "not authorized":
+                        await self.mark_operation_error(acc.id, exc)
+                    raise
 
     async def stop_client(self, account_id: int, persist_session: bool = True):
         self._clear_reconnect_backoff(account_id)
         lock = await self._acc_lock(account_id)
         async with lock:
             cli = self._clients.pop(account_id, None)
+            owner_id = self._owners.pop(account_id, None)
         if cli:
             if persist_session:
                 try:
-                    await telegram_session_store.save(account_id, cli)
+                    await telegram_session_store.save(account_id, cli, user_id=owner_id)
                 except Exception as exc:
                     log.warning("encrypted session save on disconnect failed for %s: %s", account_id, exc)
             try:
@@ -620,7 +685,7 @@ class TgClientManager:
         over the newly authenticated/imported filesystem session.
         """
         await self.stop_client(account_id, persist_session=False)
-        await telegram_session_store.clear(account_id)
+        await telegram_session_store.clear(account_id, self._owners.get(account_id))
 
     async def remove_account_instance(self, acc: Account, delete_session_file: bool = True):
         await self.stop_client(acc.id, persist_session=False)
@@ -649,10 +714,10 @@ class TgClientManager:
         login_ttl = max(60, int(settings.PENDING_LOGIN_TTL_SECONDS))
         qr_ttl = max(60, int(settings.QR_PENDING_TTL_SECONDS))
 
-        for phone, entry in list(self._pending.items()):
+        for pending_key, entry in list(self._pending.items()):
             created = entry.get("created_at")
             if created and (now - created).total_seconds() >= login_ttl:
-                await self._kill_pending(phone)
+                await self._kill_pending_key(pending_key)
 
         for qr_id, entry in list(self._qr_pending.items()):
             created = entry.get("created_at")
@@ -664,20 +729,24 @@ class TgClientManager:
     # passed the code step but need a 2FA password. Keyed by phone.
     # Each entry: { 'client': TelegramClient, 'phone_code_hash': str, 'needs_2fa': bool }
 
+    def _pending_key(self, phone: str, user_id: str | None = None) -> str:
+        return f"{self._tenant_id(user_id)}|{phone}"
+
     async def send_code(self, phone: str) -> str:
-        # If there's a stale pending login for this phone, kill it first
-        prev = self._pending.pop(phone, None)
+        uid = self._tenant_id()
+        key = self._pending_key(phone, uid)
+        prev = self._pending.pop(key, None)
         if prev:
             try: await prev['client'].disconnect()
             except Exception: pass
-        cli = TelegramClient(self._session_path(phone), settings.TG_API_ID, settings.TG_API_HASH)
+        api_id, api_hash = await self._api_credentials(uid)
+        cli = TelegramClient(self._session_path(phone, uid), api_id, api_hash)
         await asyncio.wait_for(cli.connect(), timeout=20)
         sent = await asyncio.wait_for(cli.send_code_request(phone), timeout=30)
-        self._pending[phone] = {
-            'client': cli,
+        self._pending[key] = {
+            'client': cli, 'owner_id': uid,
             'phone_code_hash': sent.phone_code_hash,
-            'needs_2fa': False,
-            'created_at': utcnow(),
+            'needs_2fa': False, 'created_at': utcnow(),
         }
         return sent.phone_code_hash
 
@@ -685,7 +754,7 @@ class TgClientManager:
         """Returns (user, needs_2fa). If needs_2fa=True, user is None and the
         client is kept alive for a follow-up submit_2fa call."""
         from telethon.errors import SessionPasswordNeededError
-        pend = self._pending.get(phone)
+        pend = self._pending.get(self._pending_key(phone))
         if not pend:
             raise RuntimeError("Không có phiên đăng nhập đang chờ. Hãy gửi mã trước.")
         cli: TelegramClient = pend['client']
@@ -707,7 +776,7 @@ class TgClientManager:
         return me, False
 
     async def submit_2fa(self, phone: str, password: str) -> TgUser:
-        pend = self._pending.get(phone)
+        pend = self._pending.get(self._pending_key(phone))
         if not pend:
             raise RuntimeError("Không có phiên 2FA đang chờ. Hãy gửi mã trước.")
         cli: TelegramClient = pend['client']
@@ -719,7 +788,7 @@ class TgClientManager:
         me = await asyncio.wait_for(cli.get_me(), timeout=20)
         # Remember this 2FA password locally so bulk ops can reuse it.
         try:
-            await secrets_store.save_2fa(phone, password)
+            await secrets_store.save_2fa(phone, password, pend.get('owner_id'))
         except Exception:
             pass
         await self._kill_pending(phone, disconnect=True)
@@ -729,7 +798,10 @@ class TgClientManager:
         await self._kill_pending(phone)
 
     async def _kill_pending(self, phone: str, disconnect: bool = True):
-        pend = self._pending.pop(phone, None)
+        await self._kill_pending_key(self._pending_key(phone), disconnect)
+
+    async def _kill_pending_key(self, key: str, disconnect: bool = True):
+        pend = self._pending.pop(key, None)
         if pend and disconnect:
             try: await pend['client'].disconnect()
             except Exception: pass
@@ -741,14 +813,23 @@ class TgClientManager:
     # frontend, which renders it as a QR image. We poll qr.wait() in a task
     # and mark the pending entry done/failed/needs_2fa accordingly.
 
-    def _qr_session_path(self, qr_id: str) -> str:
-        return str(settings.sessions_path / f"qr_{qr_id}")
+    def _qr_session_path(self, qr_id: str, user_id: str | None = None) -> str:
+        return str(self._tenant_dir(user_id) / f"qr_{qr_id}")
+
+    def _owned_qr_entry(self, qr_id: str):
+        entry = self._qr_pending.get(qr_id)
+        uid = current_tenant_id()
+        if entry and uid and entry.get("owner_id") != uid:
+            return None
+        return entry
 
     async def qr_start(self) -> dict:
         """Begin a new QR login. Returns {qr_id, url, expires_at}."""
+        uid = self._tenant_id()
         qr_id = secrets.token_urlsafe(12)
-        sess_path = self._qr_session_path(qr_id)
-        cli = TelegramClient(sess_path, settings.TG_API_ID, settings.TG_API_HASH)
+        sess_path = self._qr_session_path(qr_id, uid)
+        api_id, api_hash = await self._api_credentials(uid)
+        cli = TelegramClient(sess_path, api_id, api_hash)
         await asyncio.wait_for(cli.connect(), timeout=20)
         try:
             qr_login = await asyncio.wait_for(cli.qr_login(), timeout=30)
@@ -760,6 +841,7 @@ class TgClientManager:
         wait_task = asyncio.create_task(self._qr_wait(qr_id))
         self._qr_pending[qr_id] = {
             'client': cli,
+            'owner_id': uid,
             'qr_login': qr_login,
             'wait_task': wait_task,
             'needs_2fa': False,
@@ -802,7 +884,7 @@ class TgClientManager:
 
     async def qr_recreate(self, qr_id: str) -> dict:
         """Refresh the QR token within an existing pending entry (same client)."""
-        entry = self._qr_pending.get(qr_id)
+        entry = self._owned_qr_entry(qr_id)
         if not entry:
             raise RuntimeError("Không tìm thấy phiên QR")
         cli: TelegramClient = entry['client']
@@ -824,7 +906,7 @@ class TgClientManager:
         }
 
     async def qr_status(self, qr_id: str) -> dict:
-        entry = self._qr_pending.get(qr_id)
+        entry = self._owned_qr_entry(qr_id)
         if not entry:
             return {'state': 'missing'}
         if entry['authorized']:
@@ -840,13 +922,13 @@ class TgClientManager:
     async def qr_finalize(self, qr_id: str):
         """After authorized, return (me, session_path) so the caller can persist
         the account and rename the session file to phone-keyed naming."""
-        entry = self._qr_pending.get(qr_id)
+        entry = self._owned_qr_entry(qr_id)
         if not entry or not entry['authorized']:
             raise RuntimeError("QR chưa được xác thực")
         return entry['me'], entry['client'], entry['session_path']
 
     async def qr_submit_2fa(self, qr_id: str, password: str):
-        entry = self._qr_pending.get(qr_id)
+        entry = self._owned_qr_entry(qr_id)
         if not entry:
             raise RuntimeError("Không tìm thấy phiên QR")
         if not entry['needs_2fa']:
@@ -859,7 +941,7 @@ class TgClientManager:
         # Remember this 2FA password locally (keyed by the account's phone).
         try:
             if getattr(me, "phone", None):
-                await secrets_store.save_2fa(me.phone, password)
+                await secrets_store.save_2fa(me.phone, password, entry.get("owner_id"))
         except Exception:
             pass
         return me
@@ -867,9 +949,10 @@ class TgClientManager:
     async def qr_promote_to_phone(self, qr_id: str, phone: str):
         """Move the QR-temp session file to the canonical acc_<phone>.session
         path and disconnect the temp client. Returns the new path."""
-        entry = self._qr_pending.pop(qr_id, None)
+        entry = self._owned_qr_entry(qr_id)
         if not entry:
             raise RuntimeError("Không tìm thấy phiên QR")
+        self._qr_pending.pop(qr_id, None)
         wait_task = entry.get('wait_task')
         if wait_task and not wait_task.done():
             wait_task.cancel()
@@ -878,7 +961,7 @@ class TgClientManager:
         try: await entry['client'].disconnect()
         except Exception: pass
         src = entry['session_path']
-        dst = self._session_path(phone)
+        dst = self._session_path(phone, entry.get("owner_id"))
         try:
             self._move_session_files(src, dst)
             return dst
@@ -886,9 +969,10 @@ class TgClientManager:
             log.warning("qr session move failed: %s", e)
             return dst
     async def qr_cancel(self, qr_id: str):
-        entry = self._qr_pending.pop(qr_id, None)
+        entry = self._owned_qr_entry(qr_id)
         if not entry:
             return
+        self._qr_pending.pop(qr_id, None)
         wait_task = entry.get('wait_task')
         if wait_task and not wait_task.done():
             wait_task.cancel()
@@ -910,6 +994,7 @@ class TgClientManager:
 
     # ---------- listener ----------
     def _attach_listener(self, account_id: int, cli: TelegramClient):
+        owner_id = self._owners.get(account_id)
         @cli.on(events.NewMessage(incoming=True))
         async def _inbox_handler(event):
             try:
@@ -938,6 +1023,7 @@ class TgClientManager:
                 m_type = classify_777000(text)
                 async with AsyncSessionLocal() as db:
                     sm = SecurityMessage(
+                        user_id=owner_id,
                         account_id=account_id,
                         tg_msg_id=msg_id,
                         message_text=text,
@@ -966,7 +1052,10 @@ class TgClientManager:
     def inbox_activity(self, since_seq: int = 0) -> dict:
         events = []
         latest_seq = self._inbox_seq
-        for rows in self._inbox_events.values():
+        uid = current_tenant_id()
+        for account_id, rows in self._inbox_events.items():
+            if uid and self._owners.get(account_id) != uid:
+                continue
             for row in rows:
                 if row["seq"] > since_seq:
                     events.append(dict(row))
@@ -991,6 +1080,7 @@ class TgClientManager:
                 return
             if acc.status != status:
                 db.add(AccountStatusHistory(
+                    user_id=acc.user_id,
                     account_id=account_id,
                     status=status,
                     detail=detail,
@@ -1017,6 +1107,7 @@ class TgClientManager:
                 if acc.status == "flood_wait":
                     acc.status = "connected"
                     db.add(AccountStatusHistory(
+                        user_id=acc.user_id,
                         account_id=account_id,
                         status="connected",
                         detail="Đã hết thời gian FloodWait",
@@ -1040,6 +1131,7 @@ class TgClientManager:
             acc.last_error = f"Bị giới hạn tốc độ trong {seconds} giây"
             acc.last_ping_at = now
             db.add(AccountStatusHistory(
+                user_id=acc.user_id,
                 account_id=account_id,
                 status="flood_wait",
                 detail=acc.last_error,
@@ -1076,6 +1168,7 @@ class TgClientManager:
             if info.status and info.status != "flood_wait" and acc.status != info.status:
                 acc.status = info.status
                 db.add(AccountStatusHistory(
+                    user_id=acc.user_id,
                     account_id=account_id, status=info.status,
                     detail=acc.last_error or info.category, created_at=now,
                 ))
@@ -1100,6 +1193,15 @@ class TgClientManager:
                 return
             await record_gone_account(db, acc, "banned")
             acc.status = "banned"
+            await db.commit()
+
+    async def _mark_deactivated(self, account_id: int):
+        async with AsyncSessionLocal() as db:
+            acc = await db.get(Account, account_id)
+            if not acc or acc.status == "deactivated":
+                return
+            await record_gone_account(db, acc, "deactivated")
+            acc.status = "deactivated"
             await db.commit()
 
     async def _sync_profile(self, account_id: int, me: TgUser):
@@ -1140,7 +1242,15 @@ class TgClientManager:
                     continue
                 m_type = classify_777000(text)
                 async with AsyncSessionLocal() as db:
+                    owner_id = self._owners.get(account_id)
+                    if not owner_id:
+                        with system_scope():
+                            owner = await db.get(Account, account_id)
+                            owner_id = owner.user_id if owner else None
+                    if not owner_id:
+                        continue
                     sm = SecurityMessage(
+                        user_id=owner_id,
                         account_id=account_id,
                         tg_msg_id=msg.id,
                         message_text=text,
@@ -1166,6 +1276,11 @@ class TgClientManager:
         except (TypeError, ValueError):
             concurrency = 10
         sem = asyncio.Semaphore(concurrency)
+        owner_auto_reconnect: dict[str, bool] = {}
+        for aid, _cli in snapshot:
+            owner_id = self._owners.get(aid)
+            if owner_id and owner_id not in owner_auto_reconnect:
+                owner_auto_reconnect[owner_id] = await auto_reconnect_enabled(owner_id)
 
         async def refresh_one(aid: int, cli):
             if not self._reconnect_due(aid):
@@ -1173,12 +1288,13 @@ class TgClientManager:
             async with sem:
                 try:
                     if not cli.is_connected():
-                        if not settings.AUTO_RECONNECT:
+                        owner_id = self._owners.get(aid)
+                        if not owner_auto_reconnect.get(owner_id, settings.AUTO_RECONNECT):
                             self._clear_reconnect_backoff(aid)
                             await self._set_status(aid, "disconnected", "Auto-reconnect disabled")
                             return
                         await self.mark_reconnect_attempt(aid)
-                        await self._set_status(aid, "connecting", "Reconnecting")
+                        await self._set_status(aid, "reconnecting", "Đang kết nối lại")
                         await asyncio.wait_for(cli.connect(), timeout=20)
 
                     ok = await asyncio.wait_for(cli.is_user_authorized(), timeout=20)
@@ -1188,9 +1304,14 @@ class TgClientManager:
                     else:
                         self._clear_reconnect_backoff(aid)
                         await self._set_status(aid, "auth_required", "Phiên Telegram chưa được xác thực")
-                except (UserDeactivatedBanError, UserDeactivatedError):
+                except UserDeactivatedBanError:
                     self._clear_reconnect_backoff(aid)
                     await self._mark_banned(aid)
+                    await self.stop_client(aid, persist_session=False)
+                    await telegram_session_store.clear(aid)
+                except UserDeactivatedError:
+                    self._clear_reconnect_backoff(aid)
+                    await self._mark_deactivated(aid)
                     await self.stop_client(aid, persist_session=False)
                     await telegram_session_store.clear(aid)
                 except AuthKeyUnregisteredError as exc:
@@ -1200,7 +1321,25 @@ class TgClientManager:
                     await telegram_session_store.clear(aid)
                 except Exception as exc:
                     info = classify_error(exc)
-                    if info.retryable:
+                    owner_id = self._owners.get(aid)
+                    if info.category == "network" and owner_id:
+                        with tenant_scope(owner_id):
+                            row = await proxy_store.get_row(aid)
+                            if row and row.enabled and (row.active_slot or "primary") == "primary" and proxy_store.has_fallback(row):
+                                await proxy_store.mark_proxy_status(aid, "primary_failed", str(exc))
+                                await proxy_store.set_active_slot(aid, "fallback", failover=True)
+                                await self._set_status(aid, "proxy_error", "Proxy chính mất kết nối; chuyển sang proxy dự phòng")
+                                await self.stop_client(aid, persist_session=True)
+                                async with AsyncSessionLocal() as db:
+                                    account = await db.get(Account, aid)
+                                if account:
+                                    try:
+                                        await self.start_client(account)
+                                        return
+                                    except Exception as failover_exc:
+                                        exc = failover_exc
+                                        info = classify_error(exc)
+                    if info.retryable and info.category != "flood_wait":
                         delay = self._schedule_reconnect_backoff(aid)
                         log.info("Reconnect backoff account=%s failures=%s delay_s=%.1f", aid, self._reconnect_failures.get(aid, 0), delay)
                     await self.mark_operation_error(aid, exc)

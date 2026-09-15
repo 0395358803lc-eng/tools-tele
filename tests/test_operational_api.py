@@ -32,6 +32,9 @@ class OperationalApiTests(unittest.TestCase):
                 from app.models import Account
                 from app.routers.accounts import _account_to_out
 
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     async with AsyncSessionLocal() as db:
                         acc = Account(
@@ -60,6 +63,9 @@ class OperationalApiTests(unittest.TestCase):
                 from app.db import AsyncSessionLocal
                 from app.models import Account, TargetCheck, TargetCheckResult
                 from app.routers.messaging import target_check_history, target_check_detail
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     async with AsyncSessionLocal() as db:

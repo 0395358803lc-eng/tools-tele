@@ -13,13 +13,15 @@ from .time_utils import utcnow
 
 class Account(Base):
     __tablename__ = "accounts"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
+        Index("uq_accounts_user_phone", "user_id", "phone", unique=True),
         Index("ix_accounts_status", "status"),
         Index("ix_accounts_tg_user_id", "tg_user_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    phone: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    phone: Mapped[str] = mapped_column(String(32), index=True)
     tg_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     first_name: Mapped[str] = mapped_column(String(64), default="")
     last_name: Mapped[str] = mapped_column(String(64), default="")
@@ -49,6 +51,7 @@ class Account(Base):
 
 class TelegramSession(Base):
     __tablename__ = "telegram_sessions"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
         UniqueConstraint("account_id", "session_file", name="uq_tg_session_account_file"),
         Index("ix_tg_sessions_status", "status"),
@@ -71,6 +74,7 @@ class TelegramSession(Base):
 
 class SecurityMessage(Base):
     __tablename__ = "security_messages"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
         UniqueConstraint("account_id", "tg_msg_id", name="uq_security_account_msg"),
         Index("ix_security_received_at", "received_at"),
@@ -92,6 +96,7 @@ class SecurityMessage(Base):
 
 class GoneAccount(Base):
     __tablename__ = "gone_accounts"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -107,6 +112,7 @@ class GoneAccount(Base):
 
 class AppSetting(Base):
     __tablename__ = "app_settings"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
@@ -115,6 +121,7 @@ class AppSetting(Base):
 
 class EncryptedSecret(Base):
     __tablename__ = "encrypted_secrets"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
 
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     ciphertext: Mapped[str] = mapped_column(Text)
@@ -149,6 +156,7 @@ class LoginAttempt(Base):
 
 class AccountStatusHistory(Base):
     __tablename__ = "account_status_history"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (Index("ix_status_history_account_time", "account_id", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -162,6 +170,7 @@ class AccountStatusHistory(Base):
 
 class BulkJob(Base):
     __tablename__ = "bulk_jobs"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (Index("ix_bulk_jobs_status", "status"),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -182,6 +191,7 @@ class BulkJob(Base):
 
 class BulkJobItem(Base):
     __tablename__ = "bulk_job_items"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
         UniqueConstraint("job_id", "account_id", name="uq_bulk_job_account"),
         Index("ix_bulk_job_items_status", "status"),
@@ -204,6 +214,7 @@ class BulkJobItem(Base):
 
 class MessageDispatchItem(Base):
     __tablename__ = "message_dispatch_items"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
         UniqueConstraint("job_id", "normalized_target", name="uq_message_dispatch_job_target"),
         Index("ix_message_dispatch_items_status", "status"),
@@ -229,6 +240,7 @@ class MessageDispatchItem(Base):
 
 class PhoneCheckItem(Base):
     __tablename__ = "phone_check_items"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
         UniqueConstraint("job_id", "dedupe_key", name="uq_phone_check_job_phone"),
         Index("ix_phone_check_items_status_retry", "status", "next_retry_at"),
@@ -264,6 +276,7 @@ class PhoneCheckItem(Base):
 
 class PhoneCheckAccount(Base):
     __tablename__ = "phone_check_accounts"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
         UniqueConstraint("job_id", "account_id", name="uq_phone_check_job_account"),
         Index("ix_phone_check_accounts_status", "status"),
@@ -285,6 +298,7 @@ class PhoneCheckAccount(Base):
 
 class AccountProxy(Base):
     __tablename__ = "account_proxies"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (Index("ix_account_proxies_enabled", "enabled"),)
 
     account_id: Mapped[int] = mapped_column(
@@ -297,6 +311,16 @@ class AccountProxy(Base):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     rdns: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    fallback_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    fallback_proxy_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fallback_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    fallback_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fallback_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    fallback_password_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fallback_rdns: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    active_slot: Mapped[str] = mapped_column(String(16), default="primary", server_default="primary")
+    failover_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_failover_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_status: Mapped[str] = mapped_column(String(32), default="unknown", server_default="unknown")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -306,6 +330,7 @@ class AccountProxy(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -319,6 +344,7 @@ class AuditLog(Base):
 
 class TargetCheck(Base):
     __tablename__ = "target_checks"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     target: Mapped[str] = mapped_column(String(255), index=True)
@@ -329,6 +355,7 @@ class TargetCheck(Base):
 
 class TargetCheckResult(Base):
     __tablename__ = "target_check_results"
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     __table_args__ = (
         UniqueConstraint("target_check_id", "account_id", name="uq_target_check_account"),
     )
@@ -342,3 +369,11 @@ class TargetCheckResult(Base):
     )
     status: Mapped[str] = mapped_column(String(32))
     detail: Mapped[str] = mapped_column(Text, default="")
+
+
+TENANT_MODELS = (
+    Account, TelegramSession, SecurityMessage, GoneAccount, AppSetting, EncryptedSecret,
+    AccountStatusHistory, BulkJob, BulkJobItem, MessageDispatchItem, PhoneCheckItem,
+    PhoneCheckAccount, AccountProxy, AuditLog, TargetCheck, TargetCheckResult,
+)
+TENANT_TABLE_NAMES = {model.__tablename__ for model in TENANT_MODELS}

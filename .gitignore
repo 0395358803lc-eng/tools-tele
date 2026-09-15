@@ -24,3 +24,12 @@ backups/
 sessions.pre-restore-*/
 
 *.tsbuildinfo
+logs/
+.maintenance
+.watchdog.lock
+.pytest_cache/
+.coverage
+htmlcov/
+frontend/package.pre-security.json
+frontend/package-lock.pre-security.json
+.backup-before-*/

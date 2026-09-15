@@ -22,9 +22,11 @@ class ProxyStoreTests(unittest.TestCase):
             validate_proxy('socks5', '127.0.0.1', 70000)
 
     def test_runtime_proxy_decrypts_password_without_exposing_ciphertext(self):
-        previous = settings.SECRETS_ENCRYPTION_KEY
+        import tempfile
+        previous = settings.SESSIONS_DIR
+        td = tempfile.TemporaryDirectory(prefix='mtm_proxy_key_')
         try:
-            settings.SECRETS_ENCRYPTION_KEY = Fernet.generate_key().decode()
+            settings.SESSIONS_DIR = td.name
             cipher = encrypt_value('secret-pass')
             self.assertNotIn('secret-pass', cipher)
             row = AccountProxy(
@@ -39,7 +41,8 @@ class ProxyStoreTests(unittest.TestCase):
             self.assertEqual(cfg['password'], 'secret-pass')
             self.assertTrue(cfg['rdns'])
         finally:
-            settings.SECRETS_ENCRYPTION_KEY = previous
+            settings.SESSIONS_DIR = previous
+            td.cleanup()
 
     def test_disabled_proxy_returns_none(self):
         row = AccountProxy(

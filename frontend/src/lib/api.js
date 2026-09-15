@@ -1,3 +1,5 @@
+import { getAccessToken } from './supabase'
+
 const BASE = ''  // proxied by vite
 
 // listeners notified when any request returns 401
@@ -12,7 +14,9 @@ async function request(method, path, { json, form, query, silent } = {}) {
     ).toString()
     if (q) url += '?' + q
   }
+  const token = await getAccessToken()
   const opts = { method, headers: {}, credentials: 'include' }
+  if (token) opts.headers.Authorization = `Bearer ${token}`
   if (json !== undefined) {
     opts.headers['Content-Type'] = 'application/json'
     opts.body = JSON.stringify(json)
@@ -49,6 +53,7 @@ export const api = {
   post: (p, json)         => request('POST', p, { json }),
   put:  (p, json)         => request('PUT',  p, { json }),
   del:  (p)               => request('DELETE', p),
+  patch: (p, json)         => request('PATCH', p, { json }),
   postForm: (p, form)     => request('POST', p, { form }),
 }
 
@@ -56,9 +61,12 @@ export const api = {
 // for each line as it arrives. Shared by every live bulk task. `init` is passed
 // straight to fetch() so callers can stream a JSON body OR a multipart FormData.
 async function streamRequest(path, init, onEvent) {
+  const token = await getAccessToken()
+  const headers = { ...(init.headers || {}) }
+  if (token) headers.Authorization = `Bearer ${token}`
   let r
   try {
-    r = await fetch(BASE + path, { credentials: 'include', ...init })
+    r = await fetch(BASE + path, { credentials: 'include', ...init, headers })
   } catch {
     const e = new Error('Không thể kết nối tới máy chủ'); e.status = 0; e.network = true; throw e
   }
@@ -104,6 +112,29 @@ export function streamNDJSON(path, body, onEvent) {
 // Stream an NDJSON response from a multipart/form-data POST (file uploads).
 export function streamNDJSONForm(path, form, onEvent) {
   return streamRequest(path, { method: 'POST', body: form }, onEvent)
+}
+
+
+export async function downloadFile(path, filename) {
+  const token = await getAccessToken()
+  const headers = {}
+  if (token) headers.Authorization = `Bearer ${token}`
+  let r
+  try {
+    r = await fetch(BASE + path, { method: 'GET', headers, credentials: 'include' })
+  } catch {
+    const e = new Error('Không thể kết nối tới máy chủ'); e.status = 0; throw e
+  }
+  if (r.status === 401) _onUnauth.forEach((fn) => { try { fn() } catch {} })
+  if (!r.ok) {
+    let detail = `${r.status} ${r.statusText}`
+    try { const b = await r.json(); detail = b?.detail || detail } catch {}
+    const e = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail)); e.status = r.status; throw e
+  }
+  const blob = await r.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a'); a.href = url; a.download = filename || 'download'
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url)
 }
 
 // Convenience endpoints
@@ -191,7 +222,13 @@ export const Endpoints = {
   sendMessage: (id, target, text) => api.post(`/api/messaging/${id}/send`, { target, text }),
   bulkSend: (ids, target, text, onEvent) => streamNDJSON('/api/messaging/bulk_send', { account_ids: ids, target, text }, onEvent),
   multiSend: (ids, targets, text, onEvent) => streamNDJSON('/api/messaging/multi_send', { account_ids: ids, targets, text }, onEvent),
-  importMessageTargets: (file) => { const fd = new FormData(); fd.append('file', file); return api.postForm('/api/messaging/import_targets', fd) },
+  previewMessageTargets: (file) => { const fd = new FormData(); fd.append('file', file); return api.postForm('/api/messaging/import_targets/preview', fd) },
+  importMessageTargets: (file, selectedColumns = null, hasHeader = null) => {
+    const fd = new FormData(); fd.append('file', file)
+    if (selectedColumns?.length) fd.append('selected_columns', selectedColumns.join(','))
+    if (hasHeader !== null && hasHeader !== undefined) fd.append('has_header', String(!!hasHeader))
+    return api.postForm('/api/messaging/import_targets', fd)
+  },
   // wipe the ENTIRE chat with one user (by @username / t.me link) from selected
   // accounts: clears history for both sides (revoke) and removes the dialog
   bulkWipeChat: (ids, target, onEvent) => streamNDJSON('/api/messaging/bulk_wipe_chat', { account_ids: ids, target, confirm: true }, onEvent),
@@ -204,9 +241,10 @@ export const Endpoints = {
 
   // Inbox: live Telegram dialogs for each connected session. Message bodies stay on Telegram.
   inboxActivity: (sinceSeq = 0) => api.get('/api/inbox/activity', { since_seq: sinceSeq }),
-  inboxDialogs: (id, limit = 60, unreadOnly = false) => api.get(`/api/inbox/${id}/dialogs`, { limit, unread_only: unreadOnly }),
+  inboxDialogs: (id, limit = 60, unreadOnly = false, q = '', offset = 0) => api.get(`/api/inbox/${id}/dialogs`, { limit, unread_only: unreadOnly, q, offset }),
   inboxHistory: (id, peer, limit = 60) => api.get(`/api/inbox/${id}/history`, { peer, limit }),
   inboxMarkRead: (id, peer) => api.post(`/api/inbox/${id}/read`, { peer }),
+  inboxMarkAllRead: (id) => api.post(`/api/inbox/${id}/read-all`),
   inboxReply: (id, peer, text) => api.post(`/api/inbox/${id}/reply`, { peer, text }),
   targetCheck: (target) => api.post('/api/messaging/target_check', { target }),
   targetChecks: (limit = 30) => api.get('/api/messaging/target_checks', { limit }),
@@ -219,10 +257,14 @@ export const Endpoints = {
   pausePhoneCheckJob: (id) => api.post(`/api/phone-checks/jobs/${id}/pause`),
   resumePhoneCheckJob: (id) => api.post(`/api/phone-checks/jobs/${id}/resume`),
   cancelPhoneCheckJob: (id) => api.post(`/api/phone-checks/jobs/${id}/cancel`),
+  rebalancePhoneCheckJob: (id) => api.post(`/api/phone-checks/jobs/${id}/rebalance`),
+  downloadPhoneCheckExport: (id, kind, query = '') => downloadFile(`/api/phone-checks/jobs/${id}/export.${kind}${query ? `?${query}` : ''}`, `phone-check-${id}.${kind}`),
   proxies: () => api.get('/api/proxies'),
   saveProxy: (id, payload) => api.put(`/api/proxies/${id}`, payload),
   deleteProxy: (id) => api.del(`/api/proxies/${id}`),
   testProxy: (id) => api.post(`/api/proxies/${id}/test`),
+  testFallbackProxy: (id) => api.post(`/api/proxies/${id}/test-fallback`),
+  switchProxy: (id, slot) => api.post(`/api/proxies/${id}/switch`, { slot }),
   applyProxy: (id) => api.post(`/api/proxies/${id}/apply`),
   // which reactions this post's chat actually allows (standard + custom emoji)
   allowedReactions: (post_link, account_id) => api.post('/api/messaging/allowed_reactions', { post_link, account_id }),
@@ -236,13 +278,31 @@ export const Endpoints = {
   job: (id) => api.get(`/api/jobs/${id}`),
   cancelJob: (id) => api.post(`/api/jobs/${id}/cancel`),
   retryJob: (id, onEvent) => streamNDJSON(`/api/jobs/${id}/retry`, {}, onEvent),
+  retryMessageJob: (id, text, onEvent) => streamNDJSON(`/api/jobs/${id}/retry-message`, { text }, onEvent),
+  downloadJobExport: (id, kind) => downloadFile(`/api/jobs/${id}/export.${kind}`, `job-${id}.${kind}`),
 
   getSettings: () => api.get('/api/settings'),
   putSettings: (s) => api.put('/api/settings', s),
   exportJson: () => api.get('/api/settings/export'),
 
-  // app auth
-  me:     () => api.get('/api/auth-app/me'),
-  login:  (password) => api.post('/api/auth-app/login', { password }),
+  // Supabase identity / admin
+  bootstrapStatus: () => api.get('/api/auth-app/bootstrap/status'),
+  bootstrapAdmin: (username, password) => api.post('/api/auth-app/bootstrap', { username, password }),
+  me: () => api.get('/api/auth-app/me'),
   logout: () => api.post('/api/auth-app/logout'),
+  adminSummary: () => api.get('/api/admin/summary'),
+  adminDashboard: () => api.get('/api/admin/dashboard'),
+  adminUsers: () => api.get('/api/admin/users'),
+  adminUserOverview: (id) => api.get(`/api/admin/users/${id}/overview`),
+  adminCreateUser: (payload) => api.post('/api/admin/users', payload),
+  adminUpdateUser: (id, payload) => api.patch(`/api/admin/users/${id}`, payload),
+  adminForceLogout: (id) => api.post(`/api/admin/users/${id}/force-logout`),
+  adminDeleteUser: (id) => api.del(`/api/admin/users/${id}`),
+  adminPurgeUser: (id, confirm_username) => api.post(`/api/admin/users/${id}/purge`, { confirm_username }),
+  adminAudit: (params = {}) => api.get('/api/admin/audit', params),
+  adminJobs: (params = {}) => api.get('/api/admin/jobs', params),
+  adminCancelJob: (id) => api.post(`/api/admin/jobs/${id}/cancel`),
+  adminRetryJob: (id, onEvent) => streamNDJSON(`/api/admin/jobs/${id}/retry`, {}, onEvent),
+  adminHealth: () => api.get('/api/admin/health'),
+  adminQuotaDefaults: () => api.get('/api/admin/quota-defaults'),
 }

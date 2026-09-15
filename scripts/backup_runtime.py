@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import sys
+from urllib.parse import parse_qs, unquote, urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,7 +61,40 @@ def sqlite_path(root: Path, url: str) -> Path:
 
 
 def postgres_url(raw: str) -> str:
-    return raw.replace('postgresql+asyncpg://', 'postgresql://', 1)
+    raw = raw.replace('postgresql+asyncpg://', 'postgresql://', 1)
+    return raw.replace('?ssl=', '?sslmode=').replace('&ssl=', '&sslmode=')
+
+def find_pg_tool(name: str) -> Path | None:
+    found = shutil.which(name)
+    if found:
+        return Path(found)
+    exe = name + ('.exe' if os.name == 'nt' else '')
+    candidates = [
+        Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'pgAdmin 4' / 'runtime' / exe,
+        Path(os.environ.get('ProgramFiles', '')) / 'pgAdmin 4' / 'runtime' / exe,
+    ]
+    base = Path(os.environ.get('ProgramFiles', '')) / 'PostgreSQL'
+    if base.exists():
+        candidates.extend(sorted(base.glob(f'*/bin/{exe}'), reverse=True))
+    return next((item for item in candidates if item.is_file()), None)
+
+def pg_connection(raw: str) -> tuple[list[str], dict[str, str]]:
+    parsed = urlsplit(postgres_url(raw))
+    args: list[str] = []
+    if parsed.hostname:
+        args += ['--host', parsed.hostname]
+    if parsed.port:
+        args += ['--port', str(parsed.port)]
+    if parsed.username:
+        args += ['--username', unquote(parsed.username)]
+    args += ['--dbname', parsed.path.lstrip('/') or 'postgres']
+    env = os.environ.copy()
+    if parsed.password:
+        env['PGPASSWORD'] = unquote(parsed.password)
+    sslmode = parse_qs(parsed.query).get('sslmode', [''])[0]
+    if sslmode:
+        env['PGSSLMODE'] = sslmode
+    return args, env
 
 
 def main() -> None:
@@ -93,9 +127,13 @@ def main() -> None:
         if db_url.startswith(('postgres://', 'postgresql://', 'postgresql+asyncpg://')):
             db_type = 'postgresql'
             dump = stage / 'database.pgcustom'
-            if not shutil.which('pg_dump'):
-                raise SystemExit('Cần pg_dump để backup PostgreSQL')
-            subprocess.run(['pg_dump', '--format=custom', '--file', str(dump), postgres_url(db_url)], check=True)
+            pg_dump = find_pg_tool('pg_dump')
+            pg_restore = find_pg_tool('pg_restore')
+            if not pg_dump or not pg_restore:
+                raise SystemExit('Cần pg_dump và pg_restore để backup PostgreSQL')
+            conn_args, pg_env = pg_connection(db_url)
+            subprocess.run([str(pg_dump), '--format=custom', '--file', str(dump), *conn_args], env=pg_env, check=True)
+            subprocess.run([str(pg_restore), '--list', str(dump)], stdout=subprocess.DEVNULL, check=True)
         else:
             sqlite_snapshot(sqlite_path(root, db_url), stage / 'database.sqlite')
 
@@ -103,13 +141,16 @@ def main() -> None:
         out_sessions.mkdir()
         session_count = 0
         if sessions_dir.exists():
-            for source in sorted(sessions_dir.glob('*.session')):
-                sqlite_snapshot(source, out_sessions / source.name)
+            for source in sorted(sessions_dir.rglob('*.session')):
+                rel = source.relative_to(sessions_dir)
+                sqlite_snapshot(source, out_sessions / rel)
                 session_count += 1
-            for name in ('twofa.enc',):
-                source = sessions_dir / name
-                if source.is_file():
-                    shutil.copy2(source, out_sessions / name)
+            for name in ('twofa.enc', '.encryption.key'):
+                for source in sorted(sessions_dir.rglob(name)):
+                    rel = source.relative_to(sessions_dir)
+                    dest = out_sessions / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, dest)
 
         env_included = False
         if args.include_env:
@@ -120,7 +161,7 @@ def main() -> None:
             else:
                 print(
                     'CẢNH BÁO: đã yêu cầu --include-env nhưng backend/.env không tồn tại; '
-                    'platform-injected secrets were NOT captured. Back up SECRETS_ENCRYPTION_KEY separately.',
+                    'backend.env was not captured; platform-injected secrets were NOT captured; the internal encryption key is backed up with sessions when present.',
                     file=sys.stderr,
                 )
 
@@ -134,6 +175,7 @@ def main() -> None:
             'database_type': db_type,
             'session_count': session_count,
             'includes_env': env_included,
+            'encryption_key_included': any(k.endswith('.encryption.key') for k in files),
             'files': files,
         }
         (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding='utf-8')

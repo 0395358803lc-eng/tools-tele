@@ -70,6 +70,33 @@ class DatabaseConfigTests(unittest.TestCase):
         """)
         subprocess.run([PYTHON, '-c', code], cwd=BACKEND, env=env, check=True)
 
+    def test_supabase_transaction_pooler_is_rejected(self):
+        env = os.environ.copy()
+        env.update({
+            'DATABASE_URL': 'postgresql://postgres.ref:pass@aws-0-region.pooler.supabase.com:6543/postgres',
+            'ENFORCE_SINGLE_INSTANCE': 'true',
+        })
+        proc = subprocess.run(
+            [PYTHON, '-c', 'from app import db'], cwd=BACKEND, env=env,
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('Session pooler port 5432', proc.stdout + proc.stderr)
+
+
+    def test_asyncpg_normalizes_sslmode_to_ssl(self):
+        env = os.environ.copy()
+        env.update({
+            'DATABASE_URL': 'postgresql://user:pass@host:5432/db?sslmode=require',
+        })
+        code = textwrap.dedent("""
+            from app.config import settings
+            assert settings.database_url.startswith('postgresql+asyncpg://')
+            assert 'ssl=require' in settings.database_url
+            assert 'sslmode=' not in settings.database_url
+        """)
+        subprocess.run([PYTHON, '-c', code], cwd=BACKEND, env=env, check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

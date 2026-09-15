@@ -1,53 +1,88 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Endpoints } from '../lib/api'
+import { signInIdentity } from '../lib/supabase'
+
+function passwordError(value) {
+  if ((value || '').length < 12) return 'Mật khẩu phải có ít nhất 12 ký tự'
+  if (!/[a-z]/.test(value) || !/[A-Z]/.test(value)) return 'Mật khẩu phải có chữ hoa và chữ thường'
+  if (!/\d/.test(value)) return 'Mật khẩu phải có ít nhất một chữ số'
+  if (!/[^A-Za-z0-9]/.test(value)) return 'Mật khẩu phải có ít nhất một ký tự đặc biệt'
+  return ''
+}
 
 export default function LoginScreen({ onAuthed }) {
-  const [pw, setPw] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [mode, setMode] = useState('checking')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
+  useEffect(() => {
+    Endpoints.bootstrapStatus()
+      .then((r) => {
+        if (!r?.configured) setErr('Supabase Identity chưa được cấu hình trên máy chủ.')
+        setMode(r?.needs_admin ? 'bootstrap' : 'login')
+      })
+      .catch((e) => { setErr(e.message); setMode('login') })
+  }, [])
+
   async function submit(e) {
     e?.preventDefault?.()
-    if (!pw) return
+    if (!username || !password) return
     setBusy(true); setErr('')
     try {
-      await Endpoints.login(pw)
+      if (mode === 'bootstrap') {
+        const passwordIssue = passwordError(password)
+        if (passwordIssue) throw new Error(passwordIssue)
+        if (password !== confirm) throw new Error('Mật khẩu xác nhận không khớp')
+        await Endpoints.bootstrapAdmin(username, password)
+      }
+      await signInIdentity(username, password)
       onAuthed?.()
     } catch (e) {
       setErr(e.message || 'Đăng nhập thất bại')
-      setPw('')
+      setPassword(''); setConfirm('')
     } finally { setBusy(false) }
   }
 
+  if (mode === 'checking') {
+    return <div className="min-h-screen flex items-center justify-center">Đang kiểm tra Supabase…</div>
+  }
+
+  const bootstrap = mode === 'bootstrap'
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-zinc-100 dark:bg-zinc-950">
       <form className="nb-card p-6 w-full max-w-sm" onSubmit={submit}>
         <div className="mb-1 text-xs font-extrabold uppercase tracking-tight text-brand-pri inline-block bg-black px-2 py-0.5">
-          Được bảo vệ
+          {bootstrap ? 'Thiết lập lần đầu' : 'Supabase Identity'}
         </div>
         <h1 className="font-extrabold uppercase tracking-tighter text-2xl mb-1">Quản Lý Telegram Đa Tài Khoản</h1>
-        <p className="text-sm opacity-70 mb-4">Nhập mật khẩu để tiếp tục.</p>
-        <label className="block">
-          <div className="text-xs font-bold uppercase mb-1">Mật khẩu</div>
-          <input
-            type="password"
-            className="nb-input"
-            value={pw}
-            onChange={(e) => setPw(e.target.value)}
-            autoFocus
-            autoComplete="current-password"
-          />
+        <p className="text-sm opacity-70 mb-4">
+          {bootstrap ? 'Tạo tài khoản ADMIN đầu tiên.' : 'Đăng nhập bằng tài khoản được ADMIN cấp.'}
+        </p>
+        <label className="block mb-3">
+          <div className="text-xs font-bold uppercase mb-1">Tên đăng nhập</div>
+          <input className="nb-input" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" />
         </label>
-        {err && (
-          <div className="mt-3 nb-card-sm bg-brand-err text-black px-3 py-2 text-sm font-bold">
-            {err}
-          </div>
+        <label className="block mb-3">
+          <div className="text-xs font-bold uppercase mb-1">Mật khẩu</div>
+          <input type="password" className="nb-input" minLength={bootstrap ? 12 : undefined} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={bootstrap ? 'new-password' : 'current-password'} />
+        </label>
+        {bootstrap && (
+          <label className="block mb-3">
+            <div className="text-xs font-bold uppercase mb-1">Xác nhận mật khẩu</div>
+            <input type="password" className="nb-input" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+          </label>
         )}
-        <button className="nb-btn-pri w-full mt-4" disabled={busy || !pw} type="submit">
-          {busy ? 'Đang kiểm tra…' : 'Mở khóa'}
+        {err && (
+          <div className="mt-3 nb-card-sm bg-brand-err text-black px-3 py-2 text-sm font-bold">{err}</div>
+        )}
+        <button className="nb-btn-pri w-full mt-4" disabled={busy || !username || !password || (bootstrap && !confirm)} type="submit">
+          {busy ? 'Đang xử lý…' : bootstrap ? 'Tạo ADMIN và đăng nhập' : 'Đăng nhập'}
         </button>
         <p className="text-[10px] opacity-50 mt-4 leading-snug">
-          Nhập sai 5 lần sẽ khóa IP này trong 15 phút.
+          Quyền truy cập và phiên đăng nhập được quản lý bởi Supabase Auth.
         </p>
       </form>
     </div>

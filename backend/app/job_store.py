@@ -10,6 +10,8 @@ from .time_utils import utcnow
 from .db import AsyncSessionLocal
 from .models import AuditLog, BulkJob, BulkJobItem
 from .audit import _sanitize
+from .tenant import require_tenant_id
+from .quota import assert_job_capacity
 
 _cancel_events: dict[str, asyncio.Event] = {}
 RUNNER_ID = uuid.uuid4().hex
@@ -20,10 +22,13 @@ async def create_job(
     accounts: list[tuple[int, str, str]],
     parameters: dict | None = None,
 ) -> str:
+    await assert_job_capacity()
     job_id = uuid.uuid4().hex
     now = utcnow()
+    user_id = require_tenant_id()
     async with AsyncSessionLocal() as db:
         db.add(BulkJob(
+            user_id=user_id,
             id=job_id,
             type=job_type[:64],
             status="running",
@@ -40,6 +45,7 @@ async def create_job(
         ))
         for aid, _phone, _name in accounts:
             db.add(BulkJobItem(
+                user_id=user_id,
                 job_id=job_id,
                 account_id=aid,
                 status="queued",
@@ -134,6 +140,7 @@ async def finish_job(
             job.finished_at = now
             job.heartbeat_at = now
             db.add(AuditLog(
+                user_id=job.user_id,
                 action=f"bulk:{job.type}"[:64],
                 detail={
                     "job_id": job_id,

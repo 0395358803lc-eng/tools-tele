@@ -10,13 +10,16 @@ from pathlib import Path
 from ..time_utils import utcnow
 from ..db import get_db, AsyncSessionLocal
 from ..models import Account, SecurityMessage, GoneAccount, AuditLog
+from ..quota import assert_account_capacity
 from ..schemas import (
     AccountOut, GoneAccountOut, StatsOut, SendCodeIn, SignInIn,
     QrStartOut, QrPollIn, QrSubmit2faIn, RemoveAllAccountsIn,
 )
 from ..tg_manager import manager, record_gone_account
-from ..auth import verify_app_password
+from ..auth import require_auth
+from ..supabase_identity import IdentityUser, verify_user_password
 from ..audit import log_audit
+from .. import secrets_store
 from ..config import settings
 from ..utils import friendly_error, public_error_message, read_upload_limited
 
@@ -26,9 +29,9 @@ MAX_SESSION_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_SESSION_UPLOAD_FILES = 200
 
 
-def _require_telegram_api_config() -> None:
-    if not settings.TG_API_ID or not (settings.TG_API_HASH or "").strip():
-        raise HTTPException(409, "Chưa cấu hình Telegram App api_id/api_hash. Hãy vào Cài đặt → Telegram API để nhập trước.")
+async def _require_telegram_api_config() -> None:
+    if not await secrets_store.get_telegram_api_config():
+        raise HTTPException(409, "Chưa cấu hình Telegram App api_id/api_hash cho tài khoản này. Hãy vào Cài đặt → Telegram API.")
 
 
 def _verify_sqlite_session(path: str) -> None:
@@ -81,8 +84,13 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/accounts/remove_all")
-async def remove_all_accounts(body: RemoveAllAccountsIn, db: AsyncSession = Depends(get_db)):
-    if not verify_app_password(body.password):
+async def remove_all_accounts(
+    body: RemoveAllAccountsIn,
+    current: IdentityUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    ok = await asyncio.to_thread(verify_user_password, current.email, body.password)
+    if not ok:
         raise HTTPException(400, "Mật khẩu không đúng")
 
     res = await db.execute(select(Account).where(Account.deleted_at.is_(None)).order_by(Account.id))
@@ -179,7 +187,7 @@ async def stats(db: AsyncSession = Depends(get_db)):
 # ----- Auth -----
 @router.post("/auth/send_code")
 async def send_code(body: SendCodeIn):
-    _require_telegram_api_config()
+    await _require_telegram_api_config()
     try:
         await asyncio.wait_for(manager.send_code(body.phone), timeout=45)
     except asyncio.TimeoutError:
@@ -195,6 +203,8 @@ async def _persist_account(db: AsyncSession, phone: str, me) -> Account:
     acc = res.scalar_one_or_none()
     if acc:
         await manager.prepare_session_replacement(acc.id)
+    if not acc:
+        await assert_account_capacity()
     session_file = await manager.promote_phone_session(phone, me)
     if not acc:
         acc = Account(
@@ -284,6 +294,8 @@ async def import_sessions(files: list[UploadFile] = File(...)):
                 res = await db.execute(select(Account).where(Account.phone == phone))
                 acc = res.scalar_one_or_none()
                 replacing = bool(acc)
+                if not replacing:
+                    await assert_account_capacity()
 
                 if acc:
                     await manager.prepare_session_replacement(acc.id)
@@ -417,7 +429,7 @@ async def auth_cancel(body: SendCodeIn):
 # ----- QR Auth -----
 @router.post("/auth/qr/start", response_model=QrStartOut)
 async def qr_start():
-    _require_telegram_api_config()
+    await _require_telegram_api_config()
     try:
         info = await asyncio.wait_for(manager.qr_start(), timeout=45)
     except asyncio.TimeoutError:

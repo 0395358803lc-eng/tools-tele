@@ -51,6 +51,9 @@ class ManagerStatusTests(unittest.TestCase):
                         finally:
                             FakeClient.current -= 1
 
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     async with AsyncSessionLocal() as db:
                         rows = [

@@ -13,6 +13,7 @@ from .models import Account, BulkJob, PhoneCheckAccount, PhoneCheckItem
 from .phone_checker import check_phone
 from .tg_manager import manager
 from .time_utils import utcnow
+from .tenant import tenant_scope, system_scope
 
 log = logging.getLogger("phone_check_runner")
 
@@ -112,6 +113,16 @@ class PhoneCheckRunner:
             )
 
     async def _run_job(self, job_id: str) -> None:
+        with system_scope():
+            async with AsyncSessionLocal() as lookup_db:
+                lookup = await lookup_db.get(BulkJob, job_id)
+                owner_id = lookup.user_id if lookup else None
+        if not owner_id:
+            return
+        with tenant_scope(owner_id):
+            await self._run_job_scoped(job_id)
+
+    async def _run_job_scoped(self, job_id: str) -> None:
         runner_id = uuid.uuid4().hex
         now = utcnow()
         async with AsyncSessionLocal() as db:

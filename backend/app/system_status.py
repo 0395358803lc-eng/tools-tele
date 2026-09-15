@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import asyncio
 from datetime import datetime, timedelta
+
+import psutil
 from pathlib import Path
 
 from alembic.config import Config
@@ -12,8 +15,12 @@ from .time_utils import utcnow
 from .config import settings
 from .db import AsyncSessionLocal
 from .models import Account, BulkJob
+from . import secrets_store
+from .release_info import release_info
+from .runtime_metrics import snapshot as request_metrics_snapshot
 
 _STARTED_AT = utcnow()
+_PROCESS = psutil.Process(os.getpid())
 
 
 def expected_db_revision() -> str | None:
@@ -35,18 +42,17 @@ async def readiness() -> dict:
     current = await current_db_revision()
     db_ok = current is not None
     schema_ok = bool(expected and current == expected)
-    telegram_cfg = bool(settings.TG_API_ID and settings.TG_API_HASH)
-    secret_store = bool(settings.SECRETS_ENCRYPTION_KEY)
-    app_auth = bool(settings.APP_PASSWORD and len(settings.APP_PASSWORD) >= 12)
+    telegram_cfg = None  # Telegram API credentials are tenant-scoped
+    secret_store = secrets_store.encryption_ready()
+    app_auth = bool(settings.SUPABASE_URL and settings.SUPABASE_PUBLISHABLE_KEY and settings.SUPABASE_SECRET_KEY)
     db_kind = 'postgresql' if settings.database_url.startswith('postgresql') else 'sqlite'
-    production = os.environ.get('NODE_ENV', '').strip().lower() == 'production'
+    production = settings.NODE_ENV.strip().lower() == 'production'
     persistent_ok = (not production) or db_kind == 'postgresql'
     singleton_ok = (not production) or bool(settings.ENFORCE_SINGLE_INSTANCE)
     checks = {
         'database': db_ok,
         'schema': schema_ok,
         'app_auth': app_auth,
-        'telegram': telegram_cfg,
         'encrypted_session_store': secret_store,
         'persistent_storage': persistent_ok,
         'single_instance_guard': singleton_ok,
@@ -61,10 +67,12 @@ async def readiness() -> dict:
         'production_mode': production,
         'app_auth_configured': app_auth,
         'telegram_configured': telegram_cfg,
+        'telegram_config_scope': 'per_user',
         'encrypted_session_store': secret_store,
         'persistent_storage': persistent_ok,
         'single_instance_guard': singleton_ok,
         'failed_checks': [name for name, passed in checks.items() if not passed],
+        'release': release_info(),
     }
 
 
@@ -88,6 +96,12 @@ async def operational_status() -> dict:
             BulkJob.status.in_(['failed', 'completed_with_errors']),
         )) or 0
 
+    loop = asyncio.get_running_loop()
+    expected = loop.time() + 0.01
+    await asyncio.sleep(0.01)
+    event_loop_lag_ms = max(0.0, (loop.time() - expected) * 1000.0)
+    vm = psutil.virtual_memory()
+    mem = _PROCESS.memory_info()
     db_kind = 'postgresql' if settings.database_url.startswith('postgresql') else 'sqlite'
     return {
         'pid': os.getpid(),
@@ -103,4 +117,12 @@ async def operational_status() -> dict:
         'active_jobs': int(active_jobs),
         'stale_jobs': int(stale_jobs),
         'failed_jobs_24h': int(failed_jobs_24h),
+        'process_cpu_percent': round(float(_PROCESS.cpu_percent(interval=None)), 2),
+        'process_memory_bytes': int(mem.rss),
+        'system_cpu_percent': round(float(psutil.cpu_percent(interval=None)), 2),
+        'system_memory_percent': round(float(vm.percent), 2),
+        'system_memory_available_bytes': int(vm.available),
+        'event_loop_lag_ms': round(event_loop_lag_ms, 2),
+        'release': release_info(),
+        **request_metrics_snapshot(),
     }

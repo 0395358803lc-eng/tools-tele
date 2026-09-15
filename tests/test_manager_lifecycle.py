@@ -41,10 +41,14 @@ class ManagerLifecycleTests(unittest.TestCase):
                 from pathlib import Path
                 from app.config import settings
                 from app.tg_manager import TgClientManager
+                from app.time_utils import utcnow
 
                 class FakeClient:
                     def __init__(self): self.disconnected = 0
                     async def disconnect(self): self.disconnected += 1
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     mgr = TgClientManager()
@@ -53,17 +57,19 @@ class ManagerLifecycleTests(unittest.TestCase):
                     qr_task = asyncio.create_task(asyncio.sleep(3600))
                     session_base = str(Path(settings.SESSIONS_DIR) / 'qr_stale')
                     Path(session_base + '.session').write_bytes(b'temp')
-                    stale = datetime.now() - timedelta(seconds=120)
-                    mgr._pending['+1000'] = {
-                        'client': otp, 'phone_code_hash': 'x', 'needs_2fa': False, 'created_at': stale,
+                    stale = utcnow() - timedelta(seconds=120)
+                    uid='00000000-0000-4000-8000-000000000001'
+                    pending_key=f'{uid}|+1000'
+                    mgr._pending[pending_key] = {
+                        'client': otp, 'owner_id': uid, 'phone_code_hash': 'x', 'needs_2fa': False, 'created_at': stale,
                     }
                     mgr._qr_pending['stale'] = {
-                        'client': qr, 'wait_task': qr_task, 'created_at': stale,
+                        'client': qr, 'owner_id': uid, 'wait_task': qr_task, 'created_at': stale,
                         'session_path': session_base, 'authorized': False,
                         'needs_2fa': False, 'error': None, 'me': None, 'qr_login': object(),
                     }
                     await mgr.cleanup_pending()
-                    assert '+1000' not in mgr._pending
+                    assert pending_key not in mgr._pending
                     assert 'stale' not in mgr._qr_pending
                     assert otp.disconnected == 1
                     assert qr.disconnected == 1
@@ -99,14 +105,18 @@ class ManagerLifecycleTests(unittest.TestCase):
                     async def qr_login(self): self.qr_calls += 1; return FakeQR()
                     async def disconnect(self): self.disconnected += 1
 
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
                 async def main():
                     mgr = TgClientManager()
                     cli = FakeClient()
                     old = asyncio.create_task(asyncio.sleep(3600))
                     session_base = str(Path(settings.SESSIONS_DIR) / 'qr_live')
                     Path(session_base + '.session').write_bytes(b'temp')
+                    uid='00000000-0000-4000-8000-000000000001'
                     mgr._qr_pending['q'] = {
-                        'client': cli, 'qr_login': FakeQR(), 'wait_task': old,
+                        'client': cli, 'owner_id': uid, 'qr_login': FakeQR(), 'wait_task': old,
                         'needs_2fa': False, 'authorized': False, 'error': None,
                         'me': None, 'session_path': session_base,
                         'created_at': datetime.now() - timedelta(seconds=30),
@@ -140,6 +150,9 @@ class ManagerLifecycleTests(unittest.TestCase):
                 from app.db import AsyncSessionLocal
                 from app.models import Account
                 from app.tg_manager import TgClientManager
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     async with AsyncSessionLocal() as db:
@@ -188,6 +201,9 @@ class ManagerLifecycleTests(unittest.TestCase):
                 from app.db import AsyncSessionLocal
                 from app.models import Account
                 from app.tg_manager import TgClientManager
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     async with AsyncSessionLocal() as db:
@@ -238,6 +254,9 @@ class ManagerLifecycleTests(unittest.TestCase):
                     def is_connected(self): return self.connected
                     async def connect(self): self.connect_calls += 1; self.connected=True
                     async def is_user_authorized(self): return True
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     async with AsyncSessionLocal() as db:
@@ -304,6 +323,9 @@ class ManagerLifecycleTests(unittest.TestCase):
                     def is_connected(self): return self.connected
                     async def connect(self): self.connect_calls += 1; self.connected=True
                     async def is_user_authorized(self): return True
+
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
 
                 async def main():
                     async with AsyncSessionLocal() as db:

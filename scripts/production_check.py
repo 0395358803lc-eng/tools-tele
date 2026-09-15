@@ -5,23 +5,30 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 from cryptography.fernet import Fernet
 from dotenv import dotenv_values
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 ROOT=Path(__file__).resolve().parents[1]
 WORKSPACE=ROOT.parents[1]
+if str(ROOT / 'backend') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'backend'))
 
 def env_values():
     vals={k:str(v or '') for k,v in dotenv_values(ROOT/'backend'/'.env').items()}
     for k,v in os.environ.items():
-        if k in {'DATABASE_URL','DB_URL','APP_PASSWORD','TG_API_ID','TG_API_HASH','SECRETS_ENCRYPTION_KEY','COOKIE_SECURE','TRUST_PROXY_HEADERS','ALLOWED_ORIGIN','ENFORCE_SINGLE_INSTANCE'}:
+        if k in {'DATABASE_URL','DB_URL','SUPABASE_URL','SUPABASE_PUBLISHABLE_KEY','SUPABASE_SECRET_KEY','SUPABASE_JWKS_URL','TG_API_ID','TG_API_HASH','SESSIONS_DIR','COOKIE_SECURE','TRUST_PROXY_HEADERS','ALLOWED_ORIGIN','ENFORCE_SINGLE_INSTANCE','NODE_ENV'}:
             vals[k]=v
     return vals
 
 def truthy(v): return str(v or '').strip().lower() in {'1','true','yes','on'}
 
 def normalize_async_url(raw: str) -> str:
+    raw = raw.replace('?sslmode=', '?ssl=').replace('&sslmode=', '&ssl=')
     if raw.startswith('postgres://'):
         return 'postgresql+asyncpg://' + raw[len('postgres://'):]
     if raw.startswith('postgresql://'):
@@ -77,8 +84,16 @@ def main():
     v=env_values(); blockers=[]; warnings=[]; ok=[]
     db=(v.get('DATABASE_URL') or v.get('DB_URL') or '').strip()
     is_postgres=db.startswith(('postgres://','postgresql://','postgresql+asyncpg://'))
-    if is_postgres: ok.append('Đã cấu hình PostgreSQL bền vững')
-    else: blockers.append('Chưa cấu hình DATABASE_URL PostgreSQL bền vững; SQLite không phù hợp làm lưu trữ production trên Replit')
+    if is_postgres:
+        ok.append('Đã cấu hình PostgreSQL bền vững')
+        try:
+            parsed = make_url(normalize_async_url(db))
+            if (parsed.host or '').lower().endswith('.pooler.supabase.com') and parsed.port == 6543:
+                blockers.append('Supabase Transaction pooler port 6543 không phù hợp vì ứng dụng cần session-level advisory lock; hãy dùng Session pooler port 5432')
+        except Exception:
+            blockers.append('DATABASE_URL PostgreSQL không hợp lệ')
+    else:
+        blockers.append('Chưa cấu hình DATABASE_URL PostgreSQL bền vững; SQLite không phù hợp làm lưu trữ production')
     if args.check_db and is_postgres:
         try:
             revision=asyncio.run(database_revision(db))
@@ -89,24 +104,24 @@ def main():
                 blockers.append(f'Phiên bản schema PostgreSQL không khớp: hiện tại={revision or "thiếu"}, yêu cầu={head or "không rõ"}')
         except Exception as exc:
             blockers.append(f'Kiểm tra kết nối/schema PostgreSQL thất bại ({type(exc).__name__})')
-    pw=v.get('APP_PASSWORD','')
-    if len(pw)>=12 and 'change-me' not in pw: ok.append('Đã cấu hình APP_PASSWORD')
-    else: blockers.append('APP_PASSWORD phải được cấu hình bằng giá trị mạnh (từ 12 ký tự)')
-    key=v.get('SECRETS_ENCRYPTION_KEY','').strip()
-    key_valid = False
-    try:
-        Fernet(key.encode('ascii')); key_valid = True; ok.append('SECRETS_ENCRYPTION_KEY là Fernet key hợp lệ')
-    except Exception: blockers.append('Thiếu SECRETS_ENCRYPTION_KEY hoặc key không hợp lệ')
-    env_tg = str(v.get('TG_API_ID','')).strip() not in {'','0'} and bool(v.get('TG_API_HASH','').strip())
-    db_tg = False
-    if not env_tg and key_valid and db:
-        db_tg = asyncio.run(database_has_telegram_api(db, key))
-    if env_tg:
-        ok.append('Đã cấu hình thông tin Telegram API từ environment')
-    elif db_tg:
-        ok.append('Đã cấu hình thông tin Telegram API trong encrypted SQL secret store')
+    supabase_required = ['SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY']
+    missing_supabase = [k for k in supabase_required if not v.get(k, '').strip()]
+    if not missing_supabase:
+        ok.append('Đã cấu hình Supabase Identity')
     else:
-        blockers.append('Chưa cấu hình Telegram API trong environment hoặc encrypted SQL secret store')
+        blockers.append('Thiếu cấu hình Supabase Identity: ' + ', '.join(missing_supabase))
+    sessions_dir=Path(v.get('SESSIONS_DIR') or './sessions')
+    if not sessions_dir.is_absolute(): sessions_dir=(ROOT/'backend'/sessions_dir).resolve()
+    key_file=sessions_dir/'.encryption.key'
+    key=''; key_valid=False
+    if key_file.is_file():
+        try:
+            key=key_file.read_text(encoding='ascii').strip(); Fernet(key.encode('ascii')); key_valid=True
+            ok.append('Khóa mã hóa nội bộ hợp lệ')
+        except Exception: blockers.append('Khóa mã hóa nội bộ bị hỏng hoặc không hợp lệ')
+    else:
+        key_valid=True; ok.append('Khóa mã hóa nội bộ sẽ được tạo tự động khi ứng dụng chạy')
+    ok.append('Telegram API được cấu hình riêng cho từng user sau đăng nhập')
     if truthy(v.get('COOKIE_SECURE')):
         ok.append('Đã bật cookie bảo mật')
     elif args.strict:

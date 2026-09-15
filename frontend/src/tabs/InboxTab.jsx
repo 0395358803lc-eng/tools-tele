@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Endpoints } from '../lib/api'
 import { useToast } from '../lib/toast.jsx'
 import { accountStatusVi } from '../lib/vi'
@@ -26,6 +26,10 @@ export default function InboxTab({ accounts, selected }) {
   const [messages, setMessages] = useState([])
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
+  const [queryDraft, setQueryDraft] = useState('')
+  const dialogOffsetRef = useRef(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [unreadTotal, setUnreadTotal] = useState(0)
   const [unreadOnly, setUnreadOnly] = useState(false)
   const [loading, setLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -39,18 +43,23 @@ export default function InboxTab({ accounts, selected }) {
     if (selected?.id && !accountId) setAccountId(selected.id)
   }, [selected?.id, accountId])
 
-  const loadDialogs = useCallback(async (silent = false) => {
+  const loadDialogs = useCallback(async (silent = false, append = false) => {
     if (!accountId) return
     if (!silent) setLoading(true)
     try {
-      const r = await Endpoints.inboxDialogs(accountId, 80, unreadOnly)
-      setDialogs(r?.dialogs || [])
+      const offset = append ? dialogOffsetRef.current : 0
+      const r = await Endpoints.inboxDialogs(accountId, 60, unreadOnly, query, offset)
+      const incoming = r?.dialogs || []
+      setDialogs((old) => append ? [...old, ...incoming.filter((row) => !old.some((x) => x.peer.ref === row.peer.ref))] : incoming)
+      dialogOffsetRef.current = Number(r?.next_offset || incoming.length || 0)
+      setHasMore(!!r?.has_more)
+      setUnreadTotal(Number(r?.unread_total || 0))
     } catch (e) {
       if (!silent) toast.error(e.message)
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [accountId, unreadOnly, toast])
+  }, [accountId, unreadOnly, query, toast])
 
   const loadHistory = useCallback(async (targetPeer = peer, silent = false) => {
     if (!accountId || !targetPeer?.ref) return
@@ -134,6 +143,15 @@ export default function InboxTab({ accounts, selected }) {
     }
   }
 
+  async function markAllRead() {
+    if (!accountId) return
+    try {
+      const r = await Endpoints.inboxMarkAllRead(accountId)
+      toast.success(`Đã đánh dấu ${r.dialogs || 0} hội thoại là đã đọc`)
+      await loadDialogs(true)
+    } catch (e) { toast.error(e.message) }
+  }
+
   async function sendReply() {
     const text = draft.trim()
     if (!text || !peer?.ref || !accountId) return
@@ -150,17 +168,13 @@ export default function InboxTab({ accounts, selected }) {
     }
   }
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return dialogs
-    return dialogs.filter((d) =>
-      String(d.title || '').toLowerCase().includes(q) ||
-      String(d.username || '').toLowerCase().includes(q) ||
-      String(preview(d.last_message)).toLowerCase().includes(q)
-    )
-  }, [dialogs, query])
+  const filtered = dialogs
 
-  const unreadTotal = dialogs.reduce((sum, d) => sum + Number(d.unread_count || 0), 0)
+
+  function applySearch() {
+    dialogOffsetRef.current = 0
+    setQuery(queryDraft.trim())
+  }
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[240px_360px_minmax(0,1fr)] gap-3 h-[calc(100vh-150px)] min-h-[560px]">
@@ -178,6 +192,7 @@ export default function InboxTab({ accounts, selected }) {
               <div className="text-[10px] opacity-60 truncate">{a.phone} · {accountStatusVi(a.status)}</div>
             </button>
           ))}
+          {hasMore && <div className="p-2"><button className="nb-btn w-full !py-1 text-xs" disabled={loading} onClick={() => loadDialogs(false, true)}>Tải thêm hội thoại</button></div>}
         </div>
       </section>
 
@@ -187,12 +202,13 @@ export default function InboxTab({ accounts, selected }) {
             <span className="font-extrabold uppercase">Hội thoại</span>
             <span className="nb-badge bg-brand-violet text-black ml-auto">{unreadTotal} chưa đọc</span>
           </div>
-          <input className="nb-input !py-1 text-sm mb-2" placeholder="Tìm người gửi hoặc nội dung…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <input className="nb-input !py-1 text-sm mb-2" placeholder="Tìm người gửi hoặc nội dung…" value={queryDraft} onChange={(e) => setQueryDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') applySearch() }} />
           <div className="flex items-center gap-2">
             <label className="text-xs flex items-center gap-1">
               <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} /> Chỉ chưa đọc
             </label>
-            <button className="nb-btn !py-1 !px-2 text-xs ml-auto" onClick={() => loadDialogs()} disabled={loading}>{loading ? '…' : 'Làm mới'}</button>
+            <button className="nb-btn !py-1 !px-2 text-xs ml-auto" onClick={applySearch}>Tìm</button>
+            <button className="nb-btn !py-1 !px-2 text-xs" onClick={markAllRead} disabled={!unreadTotal}>Đọc tất cả</button><button className="nb-btn !py-1 !px-2 text-xs" onClick={() => loadDialogs()} disabled={loading}>{loading ? '…' : 'Làm mới'}</button>
           </div>
         </div>
         <div className="flex-1 overflow-auto">

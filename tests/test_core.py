@@ -114,7 +114,7 @@ class CoreTests(unittest.TestCase):
 
 
 class BrowserSecurityTests(unittest.IsolatedAsyncioTestCase):
-    def make_request(self, method='POST', origin=None, fetch_site=None, cookie=True):
+    def make_request(self, method='POST', origin=None, fetch_site=None, cookie=True, scheme='http', path='/write'):
         headers = [(b'host', b'testserver')]
         if cookie:
             headers.append((b'cookie', b'mtm_session=dummy'))
@@ -124,7 +124,7 @@ class BrowserSecurityTests(unittest.IsolatedAsyncioTestCase):
             headers.append((b'sec-fetch-site', fetch_site.encode()))
         scope = {
             'type': 'http', 'http_version': '1.1', 'method': method,
-            'scheme': 'http', 'path': '/write', 'raw_path': b'/write',
+            'scheme': scheme, 'path': path, 'raw_path': path.encode(),
             'query_string': b'', 'headers': headers,
             'client': ('127.0.0.1', 12345), 'server': ('testserver', 80),
             'root_path': '',
@@ -181,6 +181,18 @@ class BrowserSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers['x-content-type-options'], 'nosniff')
         self.assertIn('frame-ancestors', response.headers['content-security-policy'])
         self.assertTrue(response.headers.get('x-request-id'))
+
+    async def test_https_hardening_headers_and_api_no_store(self):
+        middleware = BrowserSecurityMiddleware(app=lambda scope, receive, send: None)
+        async def next_ok(_request):
+            return JSONResponse({'ok': True})
+        response = await middleware.dispatch(
+            self.make_request(method='GET', cookie=False, scheme='https', path='/api/health'), next_ok
+        )
+        self.assertEqual(response.headers['strict-transport-security'], 'max-age=31536000')
+        self.assertEqual(response.headers['cache-control'], 'no-store')
+        self.assertEqual(response.headers['permissions-policy'], 'camera=(), microphone=(), geolocation=()')
+        self.assertEqual(response.headers['cross-origin-opener-policy'], 'same-origin')
 
 
 if __name__ == '__main__':
