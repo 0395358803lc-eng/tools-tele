@@ -159,10 +159,11 @@ class ManagerLifecycleTests(unittest.TestCase):
                         active = Account(phone='active', session_file='a', status='connected')
                         banned = Account(phone='banned', session_file='b', status='banned')
                         deactivated = Account(phone='deactivated', session_file='d', status='deactivated')
+                        auth_required = Account(phone='auth-required', session_file='ar', status='auth_required')
                         deleted = Account(phone='deleted', session_file='x', status='connected', deleted_at=datetime.now())
-                        db.add_all([active, banned, deactivated, deleted])
+                        db.add_all([active, banned, deactivated, auth_required, deleted])
                         await db.commit()
-                        for row in (active, banned, deactivated, deleted): await db.refresh(row)
+                        for row in (active, banned, deactivated, auth_required, deleted): await db.refresh(row)
                     mgr = TgClientManager()
                     started = []
                     sync_started = asyncio.Event()
@@ -365,6 +366,160 @@ class ManagerLifecycleTests(unittest.TestCase):
                     async with AsyncSessionLocal() as db:
                         row=await db.get(Account,aid)
                         assert row.status=='connected' and row.reconnect_count==3
+                    mgr._clients.clear()
+                asyncio.run(main())
+            """)
+            subprocess.run([PYTHON,'-c',code],cwd=BACKEND,env=env,check=True)
+
+
+    def test_startup_concurrency_matrix_5_10_20_50_100(self):
+        with tempfile.TemporaryDirectory(prefix='mtm_startup_matrix_') as td:
+            base=Path(td); db_path=base/'matrix.db'; sessions=base/'sessions'; sessions.mkdir()
+            env=self._env(db_path,sessions); env['STARTUP_CONCURRENCY']='10'
+            subprocess.run([PYTHON,'-m','alembic','upgrade','head'],cwd=BACKEND,env=env,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            code=textwrap.dedent("""
+                import asyncio
+                from sqlalchemy import update
+                from app.db import AsyncSessionLocal
+                from app.models import Account
+                from app.tg_manager import TgClientManager
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
+                async def main():
+                    async with AsyncSessionLocal() as db:
+                        rows=[Account(phone=f'matrix-{i:03d}',session_file=f'm{i}',status='connected') for i in range(100)]
+                        db.add_all(rows); await db.commit()
+                        ids=[r.id for r in rows]
+                    for count in (5,10,20,50,100):
+                        async with AsyncSessionLocal() as db:
+                            await db.execute(update(Account).values(status='banned'))
+                            await db.execute(update(Account).where(Account.id.in_(ids[:count])).values(status='connected'))
+                            await db.commit()
+                        mgr=TgClientManager(); current=0; peak=0; started=0; lock=asyncio.Lock()
+                        async def fake_start(acc):
+                            nonlocal current,peak,started
+                            async with lock:
+                                current += 1; started += 1; peak=max(peak,current)
+                            try:
+                                await asyncio.sleep(0.01)
+                            finally:
+                                async with lock: current -= 1
+                        async def fake_sync(): return {'success':0,'failed':0,'skipped':0}
+                        mgr.start_client=fake_start; mgr.sync_session_folder=fake_sync
+                        await mgr.startup_load_all(); await asyncio.sleep(0)
+                        assert started == count, (count, started)
+                        assert peak == min(10, count), (count, peak)
+                        await mgr.shutdown()
+                asyncio.run(main())
+            """)
+            subprocess.run([PYTHON,'-c',code],cwd=BACKEND,env=env,check=True)
+
+
+    def test_start_client_clears_terminal_revoked_session(self):
+        with tempfile.TemporaryDirectory(prefix='mtm_start_terminal_') as td:
+            base=Path(td); db_path=base/'start-terminal.db'; sessions=base/'sessions'; sessions.mkdir()
+            env=self._env(db_path,sessions)
+            subprocess.run([PYTHON,'-m','alembic','upgrade','head'],cwd=BACKEND,env=env,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            code=textwrap.dedent("""
+                import asyncio
+                import app.tg_manager as tgm
+                from app.db import AsyncSessionLocal
+                from app.models import Account
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
+                class SessionRevokedError(Exception): pass
+                class FakeClient:
+                    disconnected=0
+                    def __init__(self,*a,**k): pass
+                    async def connect(self): raise SessionRevokedError('revoked at connect')
+                    async def disconnect(self): FakeClient.disconnected += 1
+                async def no_session(*a,**k): return None
+                async def no_proxy(*a,**k): return None
+                cleared=[]
+                async def clear(account_id, user_id=None): cleared.append(account_id)
+
+                async def main():
+                    async with AsyncSessionLocal() as db:
+                        acc=Account(phone='start-revoked',session_file='sr',status='connected')
+                        db.add(acc); await db.commit(); await db.refresh(acc); aid=acc.id
+                    tgm.TelegramClient=FakeClient
+                    tgm.telegram_session_store.load=no_session
+                    tgm.telegram_session_store.clear=clear
+                    tgm.proxy_store.get_row=no_proxy
+                    mgr=tgm.TgClientManager()
+                    async def creds(_uid): return (12345,'test-hash')
+                    mgr._api_credentials=creds
+                    try:
+                        await mgr.start_client(acc)
+                    except SessionRevokedError:
+                        pass
+                    else:
+                        raise AssertionError('terminal session error must propagate')
+                    assert cleared==[aid], cleared
+                    assert FakeClient.disconnected==1
+                    assert aid not in mgr._clients
+                    async with AsyncSessionLocal() as db:
+                        row=await db.get(Account,aid)
+                        assert row.status=='auth_required'
+                        assert row.last_error_type=='SessionRevokedError'
+                asyncio.run(main())
+            """)
+            subprocess.run([PYTHON,'-c',code],cwd=BACKEND,env=env,check=True)
+
+    def test_revoked_and_expired_sessions_are_removed_without_affecting_healthy_account(self):
+        with tempfile.TemporaryDirectory(prefix='mtm_terminal_sessions_') as td:
+            base=Path(td); db_path=base/'terminal.db'; sessions=base/'sessions'; sessions.mkdir()
+            env=self._env(db_path,sessions)
+            subprocess.run([PYTHON,'-m','alembic','upgrade','head'],cwd=BACKEND,env=env,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            code=textwrap.dedent("""
+                import asyncio
+                from app.db import AsyncSessionLocal
+                from app.models import Account
+                from app.tg_manager import TgClientManager
+                from app import telegram_session_store
+                from app.tenant import set_tenant_id
+                set_tenant_id('00000000-0000-4000-8000-000000000001')
+
+                class SessionRevokedError(Exception): pass
+                class SessionExpiredError(Exception): pass
+                class BadClient:
+                    def __init__(self, exc): self.exc=exc; self.disconnected=0
+                    def is_connected(self): return True
+                    async def is_user_authorized(self): raise self.exc('terminal auth')
+                    async def disconnect(self): self.disconnected += 1
+                class GoodClient:
+                    def is_connected(self): return True
+                    async def is_user_authorized(self): return True
+                    async def disconnect(self): pass
+
+                async def main():
+                    async with AsyncSessionLocal() as db:
+                        rows=[
+                            Account(phone='revoked',session_file='r',status='connected'),
+                            Account(phone='expired',session_file='e',status='connected'),
+                            Account(phone='healthy',session_file='h',status='connected'),
+                        ]
+                        db.add_all(rows); await db.commit()
+                        for row in rows: await db.refresh(row)
+                        revoked,expired,healthy=[r.id for r in rows]
+                    cleared=[]
+                    async def fake_clear(account_id, user_id=None): cleared.append(account_id)
+                    telegram_session_store.clear=fake_clear
+                    mgr=TgClientManager()
+                    bad1=BadClient(SessionRevokedError); bad2=BadClient(SessionExpiredError); good=GoodClient()
+                    mgr._clients={revoked:bad1, expired:bad2, healthy:good}
+                    await mgr.refresh_status_all()
+                    assert revoked not in mgr._clients and expired not in mgr._clients
+                    assert healthy in mgr._clients
+                    assert set(cleared)=={revoked,expired}, cleared
+                    assert bad1.disconnected==1 and bad2.disconnected==1
+                    async with AsyncSessionLocal() as db:
+                        r=await db.get(Account,revoked); e=await db.get(Account,expired); h=await db.get(Account,healthy)
+                        assert r.status=='auth_required' and r.last_error_type=='SessionRevokedError'
+                        assert e.status=='auth_required' and e.last_error_type=='SessionExpiredError'
+                        assert h.status=='connected'
                     mgr._clients.clear()
                 asyncio.run(main())
             """)
