@@ -4,6 +4,7 @@ import { useToast } from './lib/toast.jsx'
 import { useTheme } from './lib/theme'
 import { ensureNotificationPermission, desktopNotify } from './lib/util'
 import LoginScreen from './components/LoginScreen.jsx'
+import AdminLoginScreen from './components/AdminLoginScreen.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import TopStats from './components/TopStats.jsx'
 import { signOutIdentity } from './lib/supabase'
@@ -45,6 +46,7 @@ const TABS = [
 export default function App() {
   const toast = useToast()
   const { theme, toggle } = useTheme()
+  const adminRoute = window.location.pathname.startsWith('/admin')
   const [authState, setAuthState] = useState('checking') // checking | in | out
   const [currentUser, setCurrentUser] = useState(null)
   const [accounts, setAccounts] = useState([])
@@ -73,7 +75,7 @@ export default function App() {
 
   async function logout() {
     try { await Endpoints.logout() } catch {}
-    try { await signOutIdentity() } catch {}
+    try { await signOutIdentity(adminRoute ? 'admin' : 'user') } catch {}
     setAuthState('out')
     setCurrentUser(null)
     setAccounts([]); setGone([]); setSelectedId(null)
@@ -119,7 +121,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (authState !== 'in') return
+    if (authState !== 'in' || adminRoute) return
     Endpoints.getSettings().then((cfg) => setNotificationSound(cfg.notification_sound !== false)).catch(() => {})
     ensureNotificationPermission()
     refreshAccounts()
@@ -127,7 +129,7 @@ export default function App() {
     refreshGone()
     const id = setInterval(() => { refreshAccounts(); refreshStats(); refreshGone() }, 30000)
     return () => clearInterval(id)
-  }, [authState, refreshAccounts, refreshStats, refreshGone])
+  }, [authState, adminRoute, refreshAccounts, refreshStats, refreshGone])
 
   if (authState === 'checking') {
     return (
@@ -137,21 +139,18 @@ export default function App() {
     )
   }
   if (authState === 'out') {
-    return <LoginScreen onAuthed={async () => {
-      try {
-        const r = await Endpoints.me()
-        setCurrentUser(r?.user || null)
-        setAuthState(r?.authed ? 'in' : 'out')
-      } catch { setAuthState('out') }
+    const Login = adminRoute ? AdminLoginScreen : LoginScreen
+    return <Login onAuthed={(user) => {
+      setCurrentUser(user || null)
+      setAuthState(user ? 'in' : 'out')
     }} />
   }
 
-  const adminRoute = window.location.pathname.startsWith('/admin')
   if (adminRoute) {
     if (currentUser?.role !== 'admin') {
-      return <div className="min-h-screen flex items-center justify-center"><div className="nb-card p-6"><b>403 — Yêu cầu quyền ADMIN</b><br/><button className="nb-btn mt-3" onClick={() => { window.location.href = '/' }}>Quay lại</button></div></div>
+      return <div className="min-h-screen flex items-center justify-center"><div className="nb-card p-6"><b>403 — Phiên hiện tại không có quyền ADMIN</b><br/><button className="nb-btn mt-3" onClick={logout}>Đăng xuất ADMIN</button></div></div>
     }
-    return <Suspense fallback={<LazyFallback />}><AdminPage currentUser={currentUser} onBack={() => { window.location.href = '/' }} onLogout={logout} /></Suspense>
+    return <Suspense fallback={<LazyFallback />}><AdminPage currentUser={currentUser} onLogout={logout} /></Suspense>
   }
 
   const selected = accounts.find((a) => a.id === selectedId) || null
@@ -165,9 +164,6 @@ export default function App() {
         <h1 className="font-extrabold text-xl uppercase tracking-tighter">Quản Lý Telegram Đa Tài Khoản</h1>
         <div className="flex-1" />
         <span className="text-xs font-bold hidden md:inline">{currentUser?.username}</span>
-        {currentUser?.role === 'admin' && (
-          <button onClick={() => { window.location.href = '/admin' }} className="nb-btn !bg-white !text-black !py-1 !px-2">ADMIN</button>
-        )}
         <TopStats stats={stats} onBellClick={() => setTab('security')} />
         <button onClick={toggle} className="nb-btn !bg-white !text-black !py-1 !px-2" title="Đổi giao diện">
           {theme === 'dark' ? '☀' : '☾'}
