@@ -12,7 +12,8 @@ from .config import settings
 
 _URL_SECRET = re.compile(r'((?:postgres(?:ql)?(?:\+\w+)?):\/\/[^:\s]+:)([^@\s]+)(@)', re.I)
 _BEARER = re.compile(r'(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+')
-_KEY_VALUE = re.compile(r'(?i)\b(password|secret|token|api[_-]?key|authorization)\b(\s*[=:]\s*)([^\s,;]+)')
+_KEY_VALUE = re.compile(r'(?i)\b(password|secret|token|api[_-]?(?:key|hash)|authorization|cookie|otp|2fa|session|ngrok|proxy[_-]?password|encryption[_-]?key)\b(\s*[=:]\s*)([^\s,;]+)')
+_JSON_KEY_VALUE = re.compile(r'(?i)([\"\']?(?:password|secret|token|api[_-]?(?:key|hash)|authorization|cookie|otp|2fa|session|ngrok|proxy[_-]?password|encryption[_-]?key)[\"\']?\s*:\s*[\"\']?)([^\"\'\s,}]+)')
 
 
 def redact_text(value: str) -> str:
@@ -20,6 +21,7 @@ def redact_text(value: str) -> str:
     text = _URL_SECRET.sub(r'\1[redacted]\3', text)
     text = _BEARER.sub(r'\1[redacted]', text)
     text = _KEY_VALUE.sub(r'\1\2[redacted]', text)
+    text = _JSON_KEY_VALUE.sub(r'\1[redacted]', text)
     return text
 
 

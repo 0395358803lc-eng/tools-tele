@@ -21,7 +21,7 @@ from .message_dispatch_runner import message_dispatch_runner
 from . import secrets_store
 from .auth import router as auth_router, require_auth, cleanup_auth_state
 from .security_middleware import BrowserSecurityMiddleware
-from .routers import accounts, profile, security, groups, messaging, inbox, proxies, phone_checks, settings as settings_router, bulk, jobs, audit, system, admin
+from .routers import accounts, profile, security, groups, messaging, inbox, proxies, phone_checks, settings as settings_router, bulk, jobs, audit, events, system, admin
 
 configure_logging()
 log = logging.getLogger("main")
@@ -136,6 +136,7 @@ app.include_router(settings_router.router, dependencies=PROTECTED_DEPS)
 app.include_router(bulk.router,            dependencies=PROTECTED_DEPS)
 app.include_router(jobs.router,            dependencies=PROTECTED_DEPS)
 app.include_router(audit.router,           dependencies=PROTECTED_DEPS)
+app.include_router(events.router,          dependencies=PROTECTED_DEPS)
 app.include_router(system.router,          dependencies=PROTECTED_DEPS)
 
 
