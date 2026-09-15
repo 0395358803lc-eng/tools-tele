@@ -12,6 +12,7 @@ from .models import AuditLog, BulkJob, BulkJobItem
 from .audit import _sanitize
 from .tenant import require_tenant_id
 from .quota import assert_job_capacity
+from .realtime_events import emit_event
 
 _cancel_events: dict[str, asyncio.Event] = {}
 RUNNER_ID = uuid.uuid4().hex
@@ -58,6 +59,7 @@ async def create_job(
             ))
         await db.commit()
     _cancel_events[job_id] = asyncio.Event()
+    await emit_event("jobs", "info", "created", f"Đã tạo tác vụ {job_type}", job_id=job_id, progress={"processed": 0, "total": len(accounts)}, metadata={"job_type": job_type, "account_count": len(accounts)}, user_id=user_id)
     return job_id
 
 
@@ -168,6 +170,9 @@ async def finish_job(
             ))
             await db.commit()
     _cancel_events.pop(job_id, None)
+    if job:
+        level = "success" if status == "completed" else "warning" if status in {"cancelled", "completed_with_errors"} else "error"
+        await emit_event("jobs", level, "finished", f"Tác vụ {job.type} kết thúc: {status}", job_id=job_id, progress={"success": success, "failed": failed, "skipped": skipped, "pending": pending, "total": job.total}, metadata={"job_type": job.type, "status": status}, user_id=job.user_id)
 
 
 async def request_cancel(job_id: str) -> bool:
@@ -185,6 +190,7 @@ async def request_cancel(job_id: str) -> bool:
         await db.commit()
     if event:
         event.set()
+    await emit_event("jobs", "warning", "cancel_requested", f"Đã yêu cầu hủy tác vụ {job.type}", job_id=job_id, metadata={"job_type": job.type}, user_id=job.user_id)
     return True
 
 
@@ -199,7 +205,9 @@ async def pause_job(job_id: str) -> bool:
         job.heartbeat_at = now
         job.updated_at = now
         await db.commit()
-        return True
+        owner_id, job_type = job.user_id, job.type
+    await emit_event("jobs", "warning", "paused", f"Đã tạm dừng tác vụ {job_type}", job_id=job_id, metadata={"job_type": job_type}, user_id=owner_id)
+    return True
 
 
 async def resume_job(job_id: str) -> bool:
@@ -216,7 +224,9 @@ async def resume_job(job_id: str) -> bool:
         job.heartbeat_at = now
         job.updated_at = now
         await db.commit()
-        return True
+        owner_id, job_type, resume_count = job.user_id, job.type, job.resume_count
+    await emit_event("jobs", "info", "resumed", f"Đã tiếp tục tác vụ {job_type}", job_id=job_id, metadata={"job_type": job_type, "resume_count": resume_count}, user_id=owner_id)
+    return True
 
 
 async def heartbeat_job(job_id: str, runner_id: str | None = None, checkpoint: dict | None = None) -> bool:
@@ -251,7 +261,9 @@ async def fail_job(job_id: str, code: str, detail: str) -> bool:
         job.updated_at = now
         job.runner_id = None
         await db.commit()
-        return True
+        owner_id, job_type = job.user_id, job.type
+    await emit_event("jobs", "error", "failed", f"Tác vụ {job_type} thất bại", job_id=job_id, metadata={"job_type": job_type, "error_code": code}, user_id=owner_id)
+    return True
 
 
 async def is_cancelled(job_id: str) -> bool:

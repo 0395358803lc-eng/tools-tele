@@ -37,6 +37,7 @@ from . import proxy_store
 from .telegram_errors import classify_error
 from .tenant import current_tenant_id, tenant_scope, system_scope
 from .runtime_settings import auto_reconnect_enabled
+from .realtime_events import emit_event
 
 log = logging.getLogger("tg_manager")
 
@@ -1018,6 +1019,7 @@ class TgClientManager:
                     "text_preview": (getattr(msg, "message", None) or "")[:160],
                     "received_at": (getattr(msg, "date", None) or utcnow()).isoformat(),
                 })
+                await emit_event("inbox", "info", "new_message", "Có tin nhắn Telegram mới", account_id=account_id, metadata={"peer_id": getattr(event, "chat_id", None), "sender_id": sender_id, "message_id": getattr(msg, "id", 0)}, user_id=owner_id)
             except Exception as exc:
                 log.warning("inbox event capture failed for account %s: %s", account_id, exc)
 
@@ -1080,70 +1082,58 @@ class TgClientManager:
     # ---------- DB helpers ----------
     async def _set_status(self, account_id: int, status: str, detail: str | None = None):
         now = utcnow()
+        changed = False
+        owner_id = None
+        previous = None
         async with AsyncSessionLocal() as db:
             acc = await db.get(Account, account_id)
             if not acc:
                 return
-            if acc.status != status:
-                db.add(AccountStatusHistory(
-                    user_id=acc.user_id,
-                    account_id=account_id,
-                    status=status,
-                    detail=detail,
-                    created_at=now,
-                ))
+            owner_id, previous = acc.user_id, acc.status
+            changed = previous != status
+            if changed:
+                db.add(AccountStatusHistory(user_id=acc.user_id, account_id=account_id, status=status, detail=detail, created_at=now))
             acc.status = status
             acc.last_ping_at = now
             if status == "connected":
                 acc.last_success_at = now
                 if not acc.flood_wait_until or acc.flood_wait_until <= now:
-                    acc.flood_wait_until = None
-                    acc.last_error_type = None
-                    acc.last_error = None
+                    acc.flood_wait_until = None; acc.last_error_type = None; acc.last_error = None
             await db.commit()
+        if changed:
+            level = "success" if status == "connected" else "warning" if status in {"connecting", "flood_wait", "auth_required"} else "error" if status in {"proxy_error", "banned", "deactivated"} else "info"
+            await emit_event("accounts", level, status, detail or f"Trạng thái tài khoản: {previous or '-'} → {status}", account_id=account_id, metadata={"previous_status": previous, "status": status}, user_id=owner_id)
 
     async def flood_wait_remaining(self, account_id: int) -> int:
-        now = utcnow()
+        now = utcnow(); owner_id = None; cleared = False
         async with AsyncSessionLocal() as db:
             acc = await db.get(Account, account_id)
             if not acc or not acc.flood_wait_until:
                 return 0
-            if acc.flood_wait_until <= now:
-                acc.flood_wait_until = None
-                if acc.status == "flood_wait":
-                    acc.status = "connected"
-                    db.add(AccountStatusHistory(
-                        user_id=acc.user_id,
-                        account_id=account_id,
-                        status="connected",
-                        detail="Đã hết thời gian FloodWait",
-                        created_at=now,
-                    ))
-                await db.commit()
-                return 0
-            return max(1, int((acc.flood_wait_until - now).total_seconds()))
+            if acc.flood_wait_until > now:
+                return max(1, int((acc.flood_wait_until - now).total_seconds()))
+            owner_id = acc.user_id; cleared = True
+            acc.flood_wait_until = None
+            if acc.status == "flood_wait":
+                acc.status = "connected"
+                db.add(AccountStatusHistory(user_id=acc.user_id, account_id=account_id, status="connected", detail="Đã hết thời gian FloodWait", created_at=now))
+            await db.commit()
+        if cleared:
+            await emit_event("accounts", "success", "flood_wait_cleared", "Đã hết thời gian FloodWait; tài khoản có thể tiếp tục.", account_id=account_id, user_id=owner_id)
+        return 0
 
     async def mark_flood_wait(self, account_id: int, seconds: int):
-        seconds = max(1, int(seconds or 1))
-        now = utcnow()
-        until = now + timedelta(seconds=seconds)
+        seconds = max(1, int(seconds or 1)); now = utcnow(); until = now + timedelta(seconds=seconds); owner_id = None
         async with AsyncSessionLocal() as db:
             acc = await db.get(Account, account_id)
             if not acc:
                 return
-            acc.status = "flood_wait"
-            acc.flood_wait_until = until
-            acc.last_error_type = "FloodWaitError"
-            acc.last_error = f"Bị giới hạn tốc độ trong {seconds} giây"
-            acc.last_ping_at = now
-            db.add(AccountStatusHistory(
-                user_id=acc.user_id,
-                account_id=account_id,
-                status="flood_wait",
-                detail=acc.last_error,
-                created_at=now,
-            ))
+            owner_id = acc.user_id
+            acc.status = "flood_wait"; acc.flood_wait_until = until; acc.last_error_type = "FloodWaitError"
+            acc.last_error = f"Bị giới hạn tốc độ trong {seconds} giây"; acc.last_ping_at = now
+            db.add(AccountStatusHistory(user_id=acc.user_id, account_id=account_id, status="flood_wait", detail=acc.last_error, created_at=now))
             await db.commit()
+        await emit_event("accounts", "warning", "flood_wait", f"Telegram yêu cầu chờ {seconds} giây.", account_id=account_id, metadata={"retry_after_seconds": seconds, "flood_wait_until": until.isoformat()}, user_id=owner_id)
 
     async def mark_operation_success(self, account_id: int):
         now = utcnow()

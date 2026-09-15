@@ -20,6 +20,7 @@ from .tenant import system_scope, tenant_scope
 from .tg_manager import manager
 from .time_utils import utcnow
 from .utils import friendly_error
+from .realtime_events import emit_event
 
 log = logging.getLogger("message_dispatch_runner")
 
@@ -72,6 +73,7 @@ async def create_message_job(accounts, targets, text: str, parameters_extra: dic
                     attempts=0, max_attempts=3, updated_at=now,
                 ))
             await db.commit()
+        await emit_event("messaging", "info", "job_created", "Đã tạo tác vụ gửi tin nhắn", job_id=job_id, progress={"processed": 0, "total": len(targets)}, metadata={"target_count": len(targets), "account_count": len(accounts)}, user_id=owner_id)
     except Exception:
         await secrets_store.delete_named_secret(_secret_name(job_id), owner_id)
         raise
@@ -211,6 +213,7 @@ class MessageDispatchRunner:
                 .order_by(MessageDispatchItem.account_id)
             )).scalars().all()))
             await db.commit()
+        await emit_event("messaging", "info", "worker_started", "Worker bắt đầu xử lý tác vụ gửi tin nhắn", job_id=job_id, progress={"processed": 0, "total": job.total}, metadata={"account_count": len(account_ids)}, user_id=owner_id)
         text = await secrets_store.get_named_secret(_secret_name(job_id), owner_id)
         if not text:
             await job_store.fail_job(job_id, "MESSAGE_SECRET_MISSING", "Không tìm thấy nội dung tin nhắn mã hóa để tiếp tục tác vụ.")
@@ -342,34 +345,33 @@ class MessageDispatchRunner:
 
     async def _save_item(self, item_id: int, token: str | None, status: str,
                          detail: str = "", error_code: str | None = None) -> None:
-        now = utcnow()
+        now = utcnow(); payload = None
         async with AsyncSessionLocal() as db:
             item = await db.get(MessageDispatchItem, item_id)
             if not item or item.processing_token != token:
                 return
-            item.status = status
-            item.processing_token = None
-            item.error_code = error_code
+            item.status = status; item.processing_token = None; item.error_code = error_code
             item.detail = detail[:2000] if detail else None
-            item.finished_at = now if status in TERMINAL else None
-            item.updated_at = now
+            item.finished_at = now if status in TERMINAL else None; item.updated_at = now
+            payload = (item.user_id, item.job_id, item.account_id, item.target, item.attempts)
             await db.commit()
+        owner_id, job_id, account_id, target, attempts = payload
+        level = "success" if status == "ok" else "warning" if status in {"cancelled", "in_flight_unknown"} else "error" if status == "failed" else "info"
+        await emit_event("messaging", level, status, f"Gửi tin: {status}", job_id=job_id, account_id=account_id, metadata={"target": target, "attempts": attempts, "error_code": error_code}, user_id=owner_id)
 
     async def _save_rate_limited(self, item_id: int, token: str | None,
                                  seconds: int, detail: str) -> None:
-        now = utcnow()
+        now = utcnow(); payload = None; retry_at = now + timedelta(seconds=max(1, int(seconds or 1)))
         async with AsyncSessionLocal() as db:
             item = await db.get(MessageDispatchItem, item_id)
             if not item or item.processing_token != token:
                 return
-            item.status = "rate_limited"
-            item.processing_token = None
-            item.error_code = "FloodWaitError"
-            item.detail = detail[:2000]
-            item.next_retry_at = now + timedelta(seconds=max(1, int(seconds or 1)))
-            item.finished_at = None
-            item.updated_at = now
+            item.status = "rate_limited"; item.processing_token = None; item.error_code = "FloodWaitError"
+            item.detail = detail[:2000]; item.next_retry_at = retry_at; item.finished_at = None; item.updated_at = now
+            payload = (item.user_id, item.job_id, item.account_id, item.target, item.attempts)
             await db.commit()
+        owner_id, job_id, account_id, target, attempts = payload
+        await emit_event("messaging", "warning", "flood_wait", f"Tin nhắn tạm chờ FloodWait {seconds}s", job_id=job_id, account_id=account_id, metadata={"target": target, "attempts": attempts, "retry_after_seconds": int(seconds), "next_retry_at": retry_at.isoformat()}, user_id=owner_id)
 
     async def _refresh_counts(self, job_id: str) -> dict[str, int]:
         async with AsyncSessionLocal() as db:
@@ -432,7 +434,13 @@ class MessageDispatchRunner:
                 job.runner_id = None
             job.heartbeat_at = now
             job.updated_at = now
+            event_status = job.status; event_progress = dict(job.checkpoint or {})
             await db.commit()
+        if event_status in {"completed", "completed_with_errors", "cancelled", "failed"}:
+            level = "success" if event_status == "completed" else "warning" if event_status in {"completed_with_errors", "cancelled"} else "error"
+            await emit_event("messaging", level, "job_finished", f"Tác vụ gửi tin kết thúc: {event_status}", job_id=job_id, progress=event_progress, metadata={"status": event_status}, user_id=owner_id)
+        elif event_status == "paused":
+            await emit_event("messaging", "warning", "job_paused", "Tác vụ gửi tin đã tạm dừng", job_id=job_id, progress=event_progress, user_id=owner_id)
         if cleanup_secret:
             with suppress(Exception):
                 await secrets_store.delete_named_secret(_secret_name(job_id), owner_id)

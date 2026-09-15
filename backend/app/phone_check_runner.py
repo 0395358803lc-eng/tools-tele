@@ -14,6 +14,7 @@ from .phone_checker import check_phone
 from .tg_manager import manager
 from .time_utils import utcnow
 from .tenant import tenant_scope, system_scope
+from .realtime_events import emit_event
 
 log = logging.getLogger("phone_check_runner")
 
@@ -141,6 +142,7 @@ class PhoneCheckRunner:
                 row.heartbeat_at = now
             await db.commit()
             account_ids = [row.account_id for row in accounts if row.account_id is not None]
+        await emit_event("phone_check", "info", "worker_started", "Worker bắt đầu tác vụ check số", job_id=job_id, progress={"processed": int(job.total or 0) - int(job.pending or 0), "total": int(job.total or 0)}, metadata={"account_count": len(account_ids)})
 
         workers = [asyncio.create_task(self._run_account(job_id, aid, runner_id)) for aid in account_ids]
         try:
@@ -334,7 +336,11 @@ class PhoneCheckRunner:
                 await db.execute(
                     update(BulkJob).where(BulkJob.id == item.job_id).values(**job_values)
                 )
+            event_payload = (item.user_id, item.job_id, item.account_id, item.status, item.attempts, item.error_code, item.next_retry_at)
             await db.commit()
+        owner_id, event_job_id, event_account_id, event_status, attempts, error_code, retry_at = event_payload
+        level = "success" if event_status == "found" else "error" if event_status in {"invalid", "permanent_error"} else "warning" if event_status in {"retry_required", "temporary_error", "rate_limited"} else "info"
+        await emit_event("phone_check", level, event_status, f"Check số: {event_status}", job_id=event_job_id, account_id=event_account_id, metadata={"item_id": item_id, "attempts": attempts, "error_code": error_code, "next_retry_at": retry_at.isoformat() if retry_at else None}, user_id=owner_id)
 
     async def _save_retry(self, item_id: int, token: str | None, status: str, code: str, detail: str) -> None:
         class R:
@@ -360,14 +366,17 @@ class PhoneCheckRunner:
             return bool(count)
 
     async def _set_account_state(self, job_id: str, account_id: int, status: str) -> None:
+        changed = False; owner_id = None; previous = None
         async with AsyncSessionLocal() as db:
             row = (await db.execute(select(PhoneCheckAccount).where(
                 PhoneCheckAccount.job_id == job_id, PhoneCheckAccount.account_id == account_id
             ))).scalar_one_or_none()
             if row:
-                row.status = status
-                row.heartbeat_at = utcnow()
-                await db.commit()
+                owner_id, previous = row.user_id, row.status; changed = previous != status
+                row.status = status; row.heartbeat_at = utcnow(); await db.commit()
+        if changed:
+            level = "success" if status == "completed" else "warning" if status in {"flood_wait", "waiting_retry", "waiting_connection", "paused"} else "info"
+            await emit_event("phone_check", level, f"account_{status}", f"Account check số: {status}", job_id=job_id, account_id=account_id, metadata={"previous_status": previous, "status": status}, user_id=owner_id)
 
     async def _finalize_job(self, job_id: str, runner_id: str) -> None:
         now = utcnow()
@@ -401,7 +410,14 @@ class PhoneCheckRunner:
                     job.status = "queued"
             job.runner_id = None
             job.heartbeat_at = now
+            event_status = job.status; owner_id = job.user_id
+            progress = {"processed": int(job.total or 0) - int(job.pending or 0), "total": int(job.total or 0), "success": int(job.success or 0), "failed": int(job.failed or 0), "skipped": int(job.skipped or 0), "pending": int(job.pending or 0)}
             await db.commit()
+        if event_status in {"completed", "completed_with_errors", "cancelled"}:
+            level = "success" if event_status == "completed" else "warning"
+            await emit_event("phone_check", level, "job_finished", f"Tác vụ check số kết thúc: {event_status}", job_id=job_id, progress=progress, metadata={"status": event_status}, user_id=owner_id)
+        elif event_status == "paused":
+            await emit_event("phone_check", "warning", "job_paused", "Tác vụ check số đã tạm dừng", job_id=job_id, progress=progress, user_id=owner_id)
 
 
 phone_check_runner = PhoneCheckRunner()
