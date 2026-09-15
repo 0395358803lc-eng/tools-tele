@@ -28,6 +28,9 @@ class SystemStatusTests(unittest.TestCase):
                 'TG_API_HASH': '0123456789abcdef0123456789abcdef',
                 'APP_PASSWORD': 'test-password-strong',
                 'SECRETS_ENCRYPTION_KEY': Fernet.generate_key().decode(),
+                'SUPABASE_URL': 'https://example.supabase.co',
+                'SUPABASE_PUBLISHABLE_KEY': 'test-publishable-key',
+                'SUPABASE_SECRET_KEY': 'test-secret-key',
                 'NODE_ENV': 'development',
             })
             subprocess.run(
