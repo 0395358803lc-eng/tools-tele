@@ -263,6 +263,7 @@ export const Endpoints = {
   saveProxy: (id, payload) => api.put(`/api/proxies/${id}`, payload),
   deleteProxy: (id) => api.del(`/api/proxies/${id}`),
   testProxy: (id) => api.post(`/api/proxies/${id}/test`),
+  testProxyConfig: (id, payload) => api.post(`/api/proxies/${id}/test-config`, payload),
   testFallbackProxy: (id) => api.post(`/api/proxies/${id}/test-fallback`),
   switchProxy: (id, slot) => api.post(`/api/proxies/${id}/switch`, { slot }),
   applyProxy: (id) => api.post(`/api/proxies/${id}/apply`),
