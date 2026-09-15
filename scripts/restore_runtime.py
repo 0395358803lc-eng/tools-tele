@@ -26,18 +26,41 @@ def postgres_url(raw: str) -> str:
     raw = raw.replace('postgresql+asyncpg://', 'postgresql://', 1)
     return raw.replace('?ssl=', '?sslmode=').replace('&ssl=', '&sslmode=')
 
-def find_pg_tool(name: str) -> Path | None:
+def project_user_home(root: Path) -> Path | None:
+    resolved = root.resolve()
+    for item in (resolved, *resolved.parents):
+        if item.parent.name.lower() == 'users':
+            return item
+    return None
+
+
+def find_pg_tool(name: str, root: Path | None = None) -> Path | None:
     found = shutil.which(name)
     if found:
         return Path(found)
     exe = name + ('.exe' if os.name == 'nt' else '')
-    candidates = [
-        Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'pgAdmin 4' / 'runtime' / exe,
-        Path(os.environ.get('ProgramFiles', '')) / 'pgAdmin 4' / 'runtime' / exe,
-    ]
-    base = Path(os.environ.get('ProgramFiles', '')) / 'PostgreSQL'
-    if base.exists():
-        candidates.extend(sorted(base.glob(f'*/bin/{exe}'), reverse=True))
+    candidates: list[Path] = []
+    pg_bin = (os.environ.get('PG_BIN_DIR') or '').strip()
+    if pg_bin:
+        candidates.append(Path(pg_bin) / exe)
+    local_appdata = (os.environ.get('LOCALAPPDATA') or '').strip()
+    if local_appdata:
+        candidates.append(Path(local_appdata) / 'Programs' / 'pgAdmin 4' / 'runtime' / exe)
+    if root is not None:
+        home = project_user_home(root)
+        if home is not None:
+            candidates.append(home / 'AppData' / 'Local' / 'Programs' / 'pgAdmin 4' / 'runtime' / exe)
+    program_files = (os.environ.get('ProgramFiles') or '').strip()
+    if program_files:
+        candidates.append(Path(program_files) / 'pgAdmin 4' / 'runtime' / exe)
+        base = Path(program_files) / 'PostgreSQL'
+        if base.exists():
+            candidates.extend(sorted(base.glob(f'*/bin/{exe}'), reverse=True))
+    system_drive = (os.environ.get('SystemDrive') or '').strip()
+    if os.name == 'nt' and system_drive:
+        users = Path(system_drive + '\\') / 'Users'
+        if users.exists():
+            candidates.extend(sorted(users.glob(f'*/AppData/Local/Programs/pgAdmin 4/runtime/{exe}')))
     return next((item for item in candidates if item.is_file()), None)
 
 def pg_connection(raw: str) -> tuple[list[str], dict[str, str]]:
@@ -81,7 +104,7 @@ def safe_extract(tar: tarfile.TarFile, target: Path) -> None:
     tar.extractall(target, filter="data")
 
 
-def verify(stage: Path) -> dict:
+def verify(stage: Path, root: Path | None = None) -> dict:
     manifest_path = stage / 'manifest.json'
     if not manifest_path.is_file():
         raise RuntimeError('manifest.json missing')
@@ -95,7 +118,7 @@ def verify(stage: Path) -> dict:
         if file.stat().st_size != expected['size'] or sha256(file) != expected['sha256']:
             raise RuntimeError(f'Checksum mismatch: {rel}')
     if manifest.get('database_type') == 'postgresql':
-        pg_restore = find_pg_tool('pg_restore')
+        pg_restore = find_pg_tool('pg_restore', root)
         if not pg_restore:
             raise RuntimeError('Cần pg_restore để xác minh PostgreSQL backup')
         subprocess.run([str(pg_restore), '--list', str(stage / 'database.pgcustom')], stdout=subprocess.DEVNULL, check=True)
@@ -121,7 +144,7 @@ def main() -> None:
         stage.mkdir(parents=True)
         with tarfile.open(archive, 'r:gz') as tar:
             safe_extract(tar, stage)
-        manifest = verify(stage)
+        manifest = verify(stage, root)
         print(f"đã xác minh {len(manifest.get('files', {}))} tệp; cơ_sở_dữ_liệu={manifest.get('database_type')}")
         if args.verify_only:
             return
@@ -141,7 +164,7 @@ def main() -> None:
             target_url = (args.postgres_url or configured_postgres_url(backend)).strip()
             if not target_url:
                 raise SystemExit('Cần PostgreSQL URL đích trong backend/.env hoặc --postgres-url')
-            pg_restore = find_pg_tool('pg_restore')
+            pg_restore = find_pg_tool('pg_restore', root)
             if not pg_restore:
                 raise SystemExit('Cần pg_restore để phục hồi PostgreSQL')
             conn_args, pg_env = pg_connection(target_url)
