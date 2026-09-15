@@ -37,6 +37,28 @@ class WindowsOperationsTests(unittest.TestCase):
             finally:
                 wd.MAINTENANCE, wd.acquire_lock, wd.release_lock, wd.logger, wd.probe = old
 
+    def test_restart_circuit_breaker_limits_flapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_state, old_log = wd.STATE, wd.LOG_DIR
+            try:
+                wd.LOG_DIR = Path(td)
+                wd.STATE = Path(td) / "watchdog-state.json"
+                self.assertTrue(wd.permit_restart("MTM_Backend", now=100.0))
+                self.assertTrue(wd.permit_restart("MTM_Backend", now=101.0))
+                self.assertTrue(wd.permit_restart("MTM_Backend", now=102.0))
+                self.assertFalse(wd.permit_restart("MTM_Backend", now=103.0))
+                self.assertTrue(
+                    wd.permit_restart(
+                        "MTM_Backend", now=100.0 + wd.RESTART_WINDOW_SECONDS + 1
+                    )
+                )
+            finally:
+                wd.STATE, wd.LOG_DIR = old_state, old_log
+
+    def test_readiness_category_detects_database_failure(self):
+        self.assertEqual(wd.readiness_category({"failed_checks": ["postgresql"]}), "database")
+        self.assertEqual(wd.readiness_category({"failed_checks": ["other"]}), "backend")
+
     def test_public_launchers_use_maintenance_and_graceful_stop(self):
         start = (ROOT / "start-public.bat").read_text(encoding="utf-8")
         stop = (ROOT / "stop-public.bat").read_text(encoding="utf-8")
@@ -51,11 +73,27 @@ class WindowsOperationsTests(unittest.TestCase):
         src = (ROOT / "scripts" / "install_windows_tasks.py").read_text(encoding="utf-8")
         for name in ("MTM_Backend", "MTM_Ngrok", "MTM_Watchdog", "MTM_Backup"):
             self.assertIn(name, src)
-        self.assertIn('"/MO", "2"', src)
-        self.assertIn('"03:30"', src)
-        self.assertIn("ExecutionTimeLimit", src)
+        self.assertIn('"/RU", "SYSTEM"', src)
+        self.assertIn('"/SC", "ONSTART"', src)
+        self.assertIn("RestartCount", src)
         self.assertIn("MultipleInstances IgnoreNew", src)
         self.assertIn("AllowStartIfOnBatteries", src)
+        self.assertIn("runtime", src)
+
+    def test_ngrok_launcher_waits_for_backend_and_uses_runtime_config(self):
+        src = (ROOT / "run-ngrok.bat").read_text(encoding="utf-8")
+        self.assertIn("runtime\\ngrok\\ngrok.exe", src)
+        self.assertIn("runtime\\ngrok\\ngrok.yml", src)
+        self.assertIn("/api/health/ready", src)
+        self.assertIn("--config=", src)
+
+    def test_elevated_installer_and_boot_verifier_present(self):
+        elevate = (ROOT / "install-system-tasks.bat").read_text(encoding="utf-8")
+        verify = (ROOT / "scripts" / "verify_windows_boot_mode.py").read_text(encoding="utf-8")
+        self.assertIn("Verb RunAs", elevate)
+        self.assertIn("--apply-system", elevate)
+        self.assertIn("BootTrigger", verify)
+        self.assertIn("BOOT_MODE_ACCEPTANCE", verify)
 
 
 if __name__ == "__main__":
