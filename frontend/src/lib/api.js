@@ -308,6 +308,9 @@ export const Endpoints = {
   adminJobs: (params = {}) => api.get('/api/admin/jobs', params),
   adminCancelJob: (id) => api.post(`/api/admin/jobs/${id}/cancel`),
   adminRetryJob: (id, onEvent) => streamNDJSON(`/api/admin/jobs/${id}/retry`, {}, onEvent),
+  adminRealtimeSummary: () => api.get('/api/admin/realtime/summary'),
+  adminRealtimeUser: (id) => api.get(`/api/admin/realtime/users/${id}`),
+  adminRealtimeEvents: (params = {}) => api.get('/api/admin/realtime/events', params),
   adminHealth: () => api.get('/api/admin/health'),
   adminQuotaDefaults: () => api.get('/api/admin/quota-defaults'),
 }
