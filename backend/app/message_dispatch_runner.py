@@ -114,6 +114,7 @@ class MessageDispatchRunner:
 
     async def recover_stale(self) -> None:
         now = utcnow()
+        recovery_events = []
         async with AsyncSessionLocal() as db:
             await db.execute(
                 update(MessageDispatchItem)
@@ -147,7 +148,12 @@ class MessageDispatchRunner:
                 job.runner_id = None
                 job.heartbeat_at = now
                 job.updated_at = now
+                recovery_events.append((job.id, job.user_id, job.status))
             await db.commit()
+        for job_id, owner_id, status in recovery_events:
+            await emit_event("messaging", "warning", "recovered",
+                "Đã khôi phục tác vụ gửi tin sau khi worker gián đoạn", job_id=job_id,
+                metadata={"status": status, "recovery": True}, user_id=owner_id)
         for job_id, owner_id in cancelled_secrets:
             with suppress(Exception):
                 await secrets_store.delete_named_secret(_secret_name(job_id), owner_id)

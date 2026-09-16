@@ -4,6 +4,7 @@ import { fmtTime } from '../lib/util'
 import { jobStatusVi, jobTypeVi } from '../lib/vi'
 import { useToast } from '../lib/toast.jsx'
 import RealtimeLogPanel from '../components/RealtimeLogPanel.jsx'
+import JobTimelinePanel from '../components/JobTimelinePanel.jsx'
 
 const ACTIVE = new Set(['queued', 'running', 'paused', 'cancelling'])
 const RETRY_ITEMS = new Set(['failed', 'pending', 'queued', 'running'])
@@ -198,6 +199,7 @@ export default function JobsTab() {
             ))}
           </div>
         </div>
+        <JobTimelinePanel job={selected} />
         <RealtimeLogPanel title="Nhật ký realtime của tác vụ" initialFilters={{ job_id: selected.id }} compact />
         </div>
       )}
