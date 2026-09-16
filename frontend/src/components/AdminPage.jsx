@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Endpoints } from '../lib/api'
+import AdminRealtimeMonitor from './AdminRealtimeMonitor.jsx'
 
 const TABS = [
-  ['overview', 'Tổng quan'], ['users', 'Người dùng'], ['jobs', 'Tác vụ'],
+  ['overview', 'Tổng quan'], ['realtime', 'Realtime'], ['users', 'Người dùng'], ['jobs', 'Tác vụ'],
   ['audit', 'Audit'], ['system', 'Hệ thống'],
 ]
 const QUOTA_FIELDS = [
@@ -174,6 +175,8 @@ export default function AdminPage({ currentUser, onLogout }) {
             </div>
           </div>
         </>}
+        {tab === 'realtime' && <AdminRealtimeMonitor users={users} />}
+
         {tab === 'users' && <div className="space-y-4">
           <form className="nb-card p-4 grid md:grid-cols-4 gap-3" onSubmit={createUser}>
             <input className="nb-input" placeholder="Tên đăng nhập" value={form.username}

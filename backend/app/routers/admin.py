@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from .. import job_store
 from ..admin_service import admin_audit, admin_health, admin_jobs, dashboard_counts, purge_tenant_data, tenant_usage
+from ..admin_realtime import realtime_events, realtime_snapshot, realtime_user_detail
 from ..audit import log_audit
 from ..auth import require_admin
 from ..db import AsyncSessionLocal
@@ -246,6 +247,34 @@ async def admin_retry_job(job_id: str, request: Request,
             async for chunk in body_iterator:
                 yield chunk
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+@router.get("/realtime/summary")
+async def admin_realtime_summary(_: IdentityUser = Depends(require_admin)):
+    return await realtime_snapshot()
+
+
+@router.get("/realtime/users/{uid}")
+async def admin_realtime_user(uid: str, request: Request,
+                              _: IdentityUser = Depends(require_admin)):
+    detail = await realtime_user_detail(uid)
+    await log_audit("admin:realtime_user_view", detail=_request_detail(request, uid))
+    return detail
+
+
+@router.get("/realtime/events")
+async def admin_realtime_events(request: Request, limit: int = Query(200, ge=1, le=500),
+                                before_id: int | None = None, user_id: str | None = None,
+                                feature: str | None = None, level: str | None = None,
+                                account_id: int | None = None, job_id: str | None = None,
+                                _: IdentityUser = Depends(require_admin)):
+    rows = await realtime_events(limit=limit, before_id=before_id, user_id=user_id,
+        feature=feature, level=level, account_id=account_id, job_id=job_id)
+    audit_detail = _request_detail(request, user_id)
+    audit_detail.update({"feature": feature, "level": level, "account_id": account_id,
+                         "job_id": job_id, "result_count": len(rows)})
+    await log_audit("admin:realtime_events_view", detail=audit_detail)
+    return rows
 
 
 @router.get("/health")
