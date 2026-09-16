@@ -14,6 +14,7 @@ from ..models import Account, BulkJob, BulkJobItem, MessageDispatchItem, PhoneCh
 from ..audit import log_audit, _sanitize
 from ..utils import bulk_stream, friendly_error
 from ..realtime_events import emit_event
+from ..job_timeline import build_job_timeline
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -126,6 +127,8 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     out["items"] = items
     counts = Counter(str(item.get("status") or "unknown") for item in items)
     out["status_counts"] = dict(counts)
+    timeline = await build_job_timeline(db, job, items)
+    out.update(timeline)
     if job.type == "message_multi_send":
         safe_retry = sum(1 for item in items if item["status"] == "pending" and item.get("error_code") == "FloodWaitError" and int(item.get("attempts") or 0) == 0)
         delivered = int(counts.get("ok", 0))

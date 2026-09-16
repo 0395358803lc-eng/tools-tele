@@ -302,6 +302,11 @@ async def recover_interrupted_jobs(stale_after_seconds: int = 180) -> int:
             job.runner_id = None
             job.last_error_code = "WORKER_INTERRUPTED"
             job.last_error_detail = "Worker dừng hoặc heartbeat quá hạn trước khi tác vụ hoàn tất."
+        recovery_events = [(job.id, job.user_id, job.type) for job in jobs]
         if jobs:
             await db.commit()
-        return len(jobs)
+    for job_id, owner_id, job_type in recovery_events:
+        await emit_event("jobs", "warning", "recovery_interrupted",
+            f"Phát hiện worker gián đoạn tác vụ {job_type}", job_id=job_id,
+            metadata={"job_type": job_type, "status": "interrupted"}, user_id=owner_id)
+    return len(recovery_events)

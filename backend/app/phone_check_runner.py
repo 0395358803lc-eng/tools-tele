@@ -54,6 +54,7 @@ class PhoneCheckRunner:
     async def recover_stale(self) -> None:
         now = utcnow()
         recovery_at = now + timedelta(seconds=60)
+        recovery_events = []
         async with AsyncSessionLocal() as db:
             await db.execute(
                 update(PhoneCheckItem)
@@ -86,7 +87,12 @@ class PhoneCheckRunner:
                         .values(status="cancelled", processing_token=None, next_retry_at=None, finished_at=now, updated_at=now)
                     )
                     job.pending = 0
+                recovery_events.append((job.id, job.user_id, job.status))
             await db.commit()
+        for job_id, owner_id, status in recovery_events:
+            await emit_event("phone_check", "warning", "recovered",
+                "Đã khôi phục tác vụ check số sau khi worker gián đoạn", job_id=job_id,
+                metadata={"status": status, "recovery": True}, user_id=owner_id)
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
